@@ -1,0 +1,51 @@
+architecture: auto
+
+packages:
+  update: true
+  prune: false
+  keep:
+    - systemd
+    - coreutils
+    - bash
+    - sudo
+    - openssh-server
+    - netplan.io
+    - network-manager
+  extra:
+    - curl
+
+rustctl:
+  enabled: true
+  install_path: /rustctl/rustctl
+
+files:
+  - source: ./files/hostname
+    destination: /etc/hostname
+    mode: "0644"
+
+tools: []
+
+netplan:
+  enabled: true
+  renderer: NetworkManager
+  configs:
+    - source: ./netplan/10-robot.yaml
+      destination: /etc/netplan/10-robot.yaml
+      mode: "0600"
+
+systemd:
+  units:
+    - source: ./systemd/rustctl.service
+      destination: /etc/systemd/system/rustctl.service
+      enabled: true
+    - name: bluetooth.service
+      state: disabled
+
+hooks:
+  mode: container
+  after_packages:
+    - ./hooks/configure-system.sh
+  before_finalize: []
+
+test:
+  shell: false

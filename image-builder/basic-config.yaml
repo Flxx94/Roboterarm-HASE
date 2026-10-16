@@ -1,0 +1,37 @@
+# Safe starter: update the image, install rustctl, and keep existing packages.
+architecture: auto
+
+packages:
+  update: true
+  prune: false
+  keep:
+    - systemd
+    - coreutils
+    - bash
+    - sudo
+    - openssh-server
+  extra: []
+
+rustctl:
+  enabled: true
+  install_path: /rustctl/rustctl
+
+files: []
+tools: []
+
+netplan:
+  enabled: false
+
+systemd:
+  units:
+    - source: ./examples/systemd/rustctl.service
+      destination: /etc/systemd/system/rustctl.service
+      enabled: true
+
+hooks:
+  mode: container
+  after_packages: []
+  before_finalize: []
+
+test:
+  shell: false

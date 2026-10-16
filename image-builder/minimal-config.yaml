@@ -1,0 +1,47 @@
+# Aggressive package cleanup. Review `packages.keep` for the exact image and
+# add every extra command/service/driver you need before building.
+architecture: auto
+
+packages:
+  update: true
+  prune: true
+  keep:
+    - systemd
+    - systemd-sysv
+    - coreutils
+    - bash
+    - sudo
+    - openssh-server
+    - netplan.io
+    - network-manager
+  extra:
+    - curl
+
+rustctl:
+  enabled: true
+  install_path: /rustctl/rustctl
+
+files: []
+tools: []
+
+netplan:
+  enabled: true
+  renderer: NetworkManager
+  configs:
+    - source: ./examples/netplan/10-robot.yaml
+      destination: /etc/netplan/10-robot.yaml
+      mode: "0600"
+
+systemd:
+  units:
+    - source: ./examples/systemd/rustctl.service
+      destination: /etc/systemd/system/rustctl.service
+      enabled: true
+
+hooks:
+  mode: container
+  after_packages: []
+  before_finalize: []
+
+test:
+  shell: false

@@ -1,0 +1,14 @@
+services:
+  builder:
+    build:
+      context: ..
+      dockerfile: image-builder/Dockerfile
+    privileged: true
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./input:/input
+      - ./output:/output
+      - ./:/project:ro
+      - ./work:/work
+    working_dir: /workspace
