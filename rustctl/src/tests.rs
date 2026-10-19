@@ -1731,8 +1731,10 @@ fn page_styles_are_scoped_to_the_styled_themes() {
     for selector in &selectors {
         assert!(
             selector.starts_with("html[data-theme=\"win95\"]")
-                || selector.starts_with("html[data-theme=\"winxp\"]"),
-            "every rule must be scoped to Win95 or WinXP so CSS-less stays unstyled: {selector}"
+                || selector.starts_with("html[data-theme=\"winxp\"]")
+                || selector.starts_with("html[data-theme=\"win10\"]")
+                || selector.starts_with("html[data-theme=\"macos\"]"),
+            "every rule must be scoped to a styled theme so CSS-less stays unstyled: {selector}"
         );
     }
     for selector in &selectors {
@@ -1744,22 +1746,22 @@ fn page_styles_are_scoped_to_the_styled_themes() {
 }
 
 #[test]
-fn page_offers_a_theme_toggle_for_all_themes() {
+fn page_offers_a_theme_selector_for_all_themes() {
     assert!(
         PAGE_HTML.contains(r#"data-theme="win95""#),
         "the page must declare the win95 theme as its default"
     );
     assert!(
         PAGE_HTML.contains(r#"id="theme""#),
-        "page must have a theme toggle control"
+        "page must have a theme selector"
     );
+    assert!(PAGE_HTML.contains("<select id=\"theme\""));
     for token in ["THEME_KEY", "applyTheme", "localStorage", "rustctl-theme"] {
         assert!(PAGE_HTML.contains(token), "theme persistence is missing {token}");
     }
-    assert!(
-        PAGE_HTML.contains("\"CSS-less\""),
-        "the toggle must offer the CSS-less theme by name"
-    );
+    for theme in ["Windows 95", "Windows XP", "Windows 10", "macOS", "CSS-less"] {
+        assert!(PAGE_HTML.contains(theme), "the selector must offer {theme}");
+    }
 }
 
 #[test]

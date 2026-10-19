@@ -123,6 +123,14 @@ html[data-theme="win95"] input[type="number"] {
 html[data-theme="win95"] input[type="checkbox"] {
   vertical-align: middle;
 }
+html[data-theme="win95"] select {
+  background: var(--field);
+  border: 2px inset var(--face-light);
+  color: var(--ink);
+  font: inherit;
+  margin-left: 4px;
+  padding: 2px 18px 2px 4px;
+}
 html[data-theme="win95"] button {
   background: var(--face);
   border: 2px solid;
@@ -285,6 +293,15 @@ html[data-theme="winxp"] input[type="number"] {
 html[data-theme="winxp"] input[type="checkbox"] {
   vertical-align: middle;
 }
+html[data-theme="winxp"] select {
+  background: var(--field);
+  border: 1px solid #7f9db9;
+  border-radius: 2px;
+  color: var(--ink);
+  font: inherit;
+  margin-left: 4px;
+  padding: 4px 22px 4px 6px;
+}
 html[data-theme="winxp"] button {
   background: linear-gradient(180deg, #ffffff, #e5e4dc 50%, #d6d4c8);
   border: 1px solid #7f9db9;
@@ -329,6 +346,318 @@ html[data-theme="winxp"] pre {
 html[data-theme="winxp"] .hint {
   color: var(--ink-muted);
 }
+
+html[data-theme="win10"] {
+  --ink: #202020;
+  --ink-muted: #5f6368;
+  --field: #ffffff;
+  --accent: #0078d4;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  font-size: 13px;
+}
+html[data-theme="win10"] body {
+  background: linear-gradient(145deg, #005a9e, #0078d4 48%, #004e8c);
+  color: var(--ink);
+  margin: 0;
+  min-height: 100vh;
+  padding: 0;
+  box-sizing: border-box;
+}
+html[data-theme="win10"] .app-window {
+  background: #f3f3f3;
+  box-sizing: border-box;
+  margin: 0;
+  min-height: 100vh;
+  width: 100%;
+}
+html[data-theme="win10"] .titlebar {
+  align-items: center;
+  background: #f3f3f3;
+  border-bottom: 1px solid #d7d7d7;
+  color: var(--ink);
+  display: flex;
+  gap: 9px;
+  padding: 6px 0 6px 12px;
+}
+html[data-theme="win10"] .titlebar h1 {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 400;
+  margin: 0;
+}
+html[data-theme="win10"] .app-icon {
+  color: var(--accent);
+  font-size: 15px;
+}
+html[data-theme="win10"] .window-content {
+  padding: 12px;
+}
+html[data-theme="win10"] #quit {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font-family: Arial, sans-serif;
+  font-size: 18px;
+  line-height: 32px;
+  min-width: 46px;
+  padding: 0;
+  width: 46px;
+}
+html[data-theme="win10"] #quit:hover {
+  background: #e81123;
+  color: #ffffff;
+}
+html[data-theme="win10"] .window {
+  background: #ffffff;
+  border: 1px solid #d8d8d8;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+  margin-bottom: 12px;
+  padding: 12px;
+}
+html[data-theme="win10"] .window > h2 {
+  border-bottom: 1px solid #e5e5e5;
+  font-size: 14px;
+  font-weight: 600;
+  margin: -12px -12px 12px;
+  padding: 10px 12px;
+}
+html[data-theme="win10"] fieldset {
+  border: 1px solid #c8c8c8;
+  margin: 0 0 10px;
+  padding: 10px;
+}
+html[data-theme="win10"] legend {
+  color: var(--ink-muted);
+  padding: 0 5px;
+}
+html[data-theme="win10"] p {
+  margin: 0 0 9px;
+}
+html[data-theme="win10"] label {
+  display: block;
+}
+html[data-theme="win10"] input[type="number"] {
+  background: var(--field);
+  border: 1px solid #8a8a8a;
+  padding: 5px 7px;
+  width: 9em;
+}
+html[data-theme="win10"] input[type="checkbox"] {
+  accent-color: var(--accent);
+  vertical-align: middle;
+}
+html[data-theme="win10"] button {
+  background: var(--accent);
+  border: 1px solid #0067b8;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  min-width: 7em;
+  padding: 6px 12px;
+}
+html[data-theme="win10"] button:hover:not(:disabled) {
+  background: #0067b8;
+}
+html[data-theme="win10"] button:active:not(:disabled) {
+  background: #005a9e;
+}
+html[data-theme="win10"] button:disabled {
+  background: #e5e5e5;
+  border-color: #d1d1d1;
+  color: #8a8a8a;
+}
+html[data-theme="win10"] .toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+html[data-theme="win10"] .status {
+  font-weight: 600;
+}
+html[data-theme="win10"] pre {
+  background: #fafafa;
+  border: 1px solid #c8c8c8;
+  margin: 0;
+  max-height: 22em;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+html[data-theme="win10"] .hint {
+  color: var(--ink-muted);
+}
+html[data-theme="win10"] select {
+  background: #ffffff;
+  border: 1px solid #8a8a8a;
+  color: var(--ink);
+  font: inherit;
+  margin-left: 4px;
+  padding: 5px 24px 5px 7px;
+}
+
+html[data-theme="macos"] {
+  --ink: #202124;
+  --ink-muted: #63666a;
+  --field: #ffffff;
+  --accent: #0a84ff;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  font-size: 13px;
+}
+html[data-theme="macos"] body {
+  background: linear-gradient(135deg, #cfdef3, #e0c3fc 52%, #fbc2eb);
+  color: var(--ink);
+  margin: 0;
+  min-height: 100vh;
+  padding: 0;
+  box-sizing: border-box;
+}
+html[data-theme="macos"] .app-window {
+  background: #f5f5f7;
+  border: 1px solid #b8b8bc;
+  box-shadow: 0 8px 28px rgba(20, 24, 40, .24);
+  box-sizing: border-box;
+  margin: 0;
+  min-height: 100vh;
+  width: 100%;
+}
+html[data-theme="macos"] .titlebar {
+  align-items: center;
+  background: linear-gradient(#fafafa, #e8e8eb);
+  border-bottom: 1px solid #c7c7ca;
+  color: var(--ink);
+  display: flex;
+  gap: 9px;
+  padding: 7px 10px;
+}
+html[data-theme="macos"] .titlebar h1 {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+}
+html[data-theme="macos"] .app-icon {
+  color: #626267;
+  font-size: 15px;
+}
+html[data-theme="macos"] .window-content {
+  padding: 12px;
+}
+html[data-theme="macos"] #quit {
+  background: #ff5f57;
+  border: 1px solid #e0443e;
+  border-radius: 50%;
+  box-shadow: inset 0 1px rgba(255, 255, 255, .45);
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  font-size: 12px;
+  font-weight: bold;
+  height: 20px;
+  line-height: 17px;
+  min-width: 20px;
+  padding: 0;
+  width: 20px;
+}
+html[data-theme="macos"] #quit:hover {
+  background: #e0443e;
+  box-shadow: 0 0 0 2px rgba(255, 95, 87, .24);
+}
+html[data-theme="macos"] .window {
+  background: #ffffff;
+  border: 1px solid #dedee2;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .06);
+  margin-bottom: 12px;
+  padding: 12px;
+}
+html[data-theme="macos"] .window > h2 {
+  border-bottom: 1px solid #e7e7eb;
+  font-size: 14px;
+  font-weight: 600;
+  margin: -12px -12px 12px;
+  padding: 10px 12px;
+}
+html[data-theme="macos"] fieldset {
+  border: 1px solid #d2d2d7;
+  border-radius: 6px;
+  margin: 0 0 10px;
+  padding: 10px;
+}
+html[data-theme="macos"] legend {
+  color: var(--ink-muted);
+  padding: 0 5px;
+}
+html[data-theme="macos"] p {
+  margin: 0 0 9px;
+}
+html[data-theme="macos"] label {
+  display: block;
+}
+html[data-theme="macos"] input[type="number"] {
+  background: var(--field);
+  border: 1px solid #b8b8bc;
+  border-radius: 6px;
+  padding: 5px 7px;
+  width: 9em;
+}
+html[data-theme="macos"] input[type="checkbox"] {
+  accent-color: var(--accent);
+  vertical-align: middle;
+}
+html[data-theme="macos"] button {
+  background: var(--accent);
+  border: 1px solid #0876df;
+  border-radius: 6px;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  min-width: 7em;
+  padding: 6px 12px;
+}
+html[data-theme="macos"] button:hover:not(:disabled) {
+  background: #0876df;
+}
+html[data-theme="macos"] button:active:not(:disabled) {
+  background: #0064c8;
+}
+html[data-theme="macos"] button:disabled {
+  background: #d8d8dc;
+  border-color: #d8d8dc;
+  color: #85858a;
+}
+html[data-theme="macos"] .toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+html[data-theme="macos"] .status {
+  font-weight: 600;
+}
+html[data-theme="macos"] pre {
+  background: #fafafa;
+  border: 1px solid #d2d2d7;
+  border-radius: 6px;
+  margin: 0;
+  max-height: 22em;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+html[data-theme="macos"] .hint {
+  color: var(--ink-muted);
+}
+html[data-theme="macos"] select {
+  background: #ffffff;
+  border: 1px solid #b8b8bc;
+  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+  margin-left: 4px;
+  padding: 5px 24px 5px 7px;
+}
 </style>
 </head>
 <body>
@@ -348,7 +677,15 @@ html[data-theme="winxp"] .hint {
 <output id="status" class="status">unknown</output>
 <button type="button" id="refresh">Refresh status</button>
 <button type="button" id="selftest">Run self-test</button>
-<button type="button" id="theme">Theme: Win95</button>
+<label for="theme">Theme
+<select id="theme" aria-label="Theme">
+<option value="win95">Windows 95</option>
+<option value="winxp">Windows XP</option>
+<option value="win10">Windows 10</option>
+<option value="macos">macOS</option>
+<option value="plain">CSS-less</option>
+</select>
+</label>
 </p>
 </div>
 
@@ -414,7 +751,7 @@ html[data-theme="winxp"] .hint {
 "use strict";
 const $ = (id) => document.getElementById(id);
 const THEME_KEY = "rustctl-theme";
-const THEMES = ["win95", "winxp", "plain"];
+const THEMES = ["win95", "winxp", "win10", "macos", "plain"];
 let locked = 0;
 
 function log(title, text) {
@@ -437,7 +774,7 @@ function recall(key) {
 function applyTheme(name) {
   const theme = THEMES.includes(name) ? name : "win95";
   document.documentElement.setAttribute("data-theme", theme);
-  $("theme").textContent = "Theme: " + (theme === "win95" ? "Win95" : theme === "winxp" ? "WinXP" : "CSS-less");
+  $("theme").value = theme;
   $("quit").textContent = theme === "plain" ? "Quit server" : "×";
   store(THEME_KEY, theme);
 }
@@ -489,10 +826,7 @@ for (const form of document.querySelectorAll("form[data-path]")) {
 }
 $("refresh").addEventListener("click", refresh);
 $("selftest").addEventListener("click", () => call("GET", "/test"));
-$("theme").addEventListener("click", () => {
-  const current = document.documentElement.getAttribute("data-theme");
-  applyTheme(THEMES[(THEMES.indexOf(current) + 1) % THEMES.length]);
-});
+$("theme").addEventListener("change", () => applyTheme($("theme").value));
 $("quit").addEventListener("click", async () => {
   const result = await call("POST", "/quit");
   if (result && result.ok) $("status").textContent = "server shutting down";
