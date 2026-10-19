@@ -1717,7 +1717,7 @@ fn page_style_block() -> &'static str {
 }
 
 #[test]
-fn page_styles_are_scoped_to_the_win95_theme() {
+fn page_styles_are_scoped_to_the_styled_themes() {
     let css = page_style_block();
     let selectors: Vec<&str> = css
         .lines()
@@ -1730,8 +1730,9 @@ fn page_styles_are_scoped_to_the_win95_theme() {
     );
     for selector in &selectors {
         assert!(
-            selector.starts_with("html[data-theme=\"win95\"]"),
-            "every rule must be scoped to the win95 theme so the plain theme stays CSS-less: {selector}"
+            selector.starts_with("html[data-theme=\"win95\"]")
+                || selector.starts_with("html[data-theme=\"winxp\"]"),
+            "every rule must be scoped to Win95 or WinXP so CSS-less stays unstyled: {selector}"
         );
     }
     for selector in &selectors {
@@ -1743,7 +1744,7 @@ fn page_styles_are_scoped_to_the_win95_theme() {
 }
 
 #[test]
-fn page_offers_a_theme_toggle_for_both_themes() {
+fn page_offers_a_theme_toggle_for_all_themes() {
     assert!(
         PAGE_HTML.contains(r#"data-theme="win95""#),
         "the page must declare the win95 theme as its default"

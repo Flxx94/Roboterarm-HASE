@@ -2,6 +2,7 @@ use std::{
     env,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
     thread,
     time::Duration,
 };
@@ -197,13 +198,27 @@ pub(crate) fn origin_is_trusted(origin: Option<&str>, host: Option<&str>) -> boo
 }
 
 pub(crate) fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    handle_connection_with_shutdown(&mut stream, None)
+}
+
+fn handle_connection_with_shutdown(
+    stream: &mut TcpStream,
+    shutdown: Option<Sender<()>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-    handle_request(&mut stream)
+    handle_request_with_shutdown(stream, shutdown)
 }
 
 pub(crate) fn handle_request(
     stream: &mut (impl Read + Write),
+) -> Result<(), Box<dyn std::error::Error>> {
+    handle_request_with_shutdown(stream, None)
+}
+
+fn handle_request_with_shutdown(
+    stream: &mut (impl Read + Write),
+    shutdown: Option<Sender<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = match read_http_request(stream) {
         Ok(request) => request,
@@ -229,6 +244,32 @@ pub(crate) fn handle_request(
             "403 Forbidden",
             &error_json("cross-origin request refused"),
         );
+    }
+
+    if path == "/quit" {
+        if request.method != "POST" {
+            return write_json_response(
+                stream,
+                "405 Method Not Allowed",
+                &error_json("method not allowed"),
+            );
+        }
+        if !request.body.is_empty() {
+            return write_json_response(
+                stream,
+                "400 Bad Request",
+                &error_json("quit request body must be empty"),
+            );
+        }
+        write_json_response(
+            stream,
+            "200 OK",
+            &json!({"ok": true, "status": "shutting_down"}),
+        )?;
+        if let Some(shutdown) = shutdown {
+            let _ = shutdown.send(());
+        }
+        return Ok(());
     }
 
     match api_command_for_request(&request.method, &request.target, &request.body) {
@@ -321,7 +362,7 @@ pub(crate) fn banner_lines(
         lines.push(pretty::info(url));
     }
     lines.push(pretty::info(&format!(
-        "hardware_enabled={hardware_enabled} | routes=/,/status,/help,/test,/args,/raw,/api"
+        "hardware_enabled={hardware_enabled} | routes=/,/status,/help,/test,/args,/raw,/api,/quit"
     )));
     if !hardware_enabled {
         lines.push(pretty::warning(
@@ -339,6 +380,25 @@ fn startup_banner(local_addr: SocketAddr) {
     }
 }
 
+fn shutdown_requested(shutdown: &Receiver<()>) -> bool {
+    matches!(
+        shutdown.try_recv(),
+        Ok(()) | Err(TryRecvError::Disconnected)
+    )
+}
+
+fn reap_finished_workers(workers: &mut Vec<thread::JoinHandle<()>>) {
+    let mut index = 0;
+    while index < workers.len() {
+        if workers[index].is_finished() {
+            let worker = workers.swap_remove(index);
+            let _ = worker.join();
+        } else {
+            index += 1;
+        }
+    }
+}
+
 pub(crate) fn run_api() -> Result<(), Box<dyn std::error::Error + 'static>> {
     let (address, deprecated) = resolve_bind_address();
     if deprecated {
@@ -348,22 +408,40 @@ pub(crate) fn run_api() -> Result<(), Box<dyn std::error::Error + 'static>> {
         );
     }
     let listener = TcpListener::bind(&address)?;
+    listener.set_nonblocking(true)?;
     startup_banner(listener.local_addr()?);
     io::stdout().flush()?;
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream) {
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let mut workers = Vec::new();
+    loop {
+        if shutdown_requested(&shutdown_rx) {
+            break;
+        }
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let shutdown = shutdown_tx.clone();
+                workers.push(thread::spawn(move || {
+                    if let Err(error) = handle_connection_with_shutdown(&mut stream, Some(shutdown))
+                    {
                         eprintln!("{}", pretty::warning(&format!("connection error: {error}")));
                     }
-                });
+                }));
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                match shutdown_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
+                }
             }
             Err(error) => eprintln!(
                 "{}",
                 pretty::warning(&format!("API connection failed: {error}"))
             ),
         }
+        reap_finished_workers(&mut workers);
+    }
+    for worker in workers {
+        let _ = worker.join();
     }
     Ok(())
 }

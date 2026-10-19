@@ -268,7 +268,7 @@ subgraph group_interfaces["Command interfaces"]
   node_shell["Interactive shell<br/>REPL<br/>[shell.rs]"]
   node_http["Site mode<br/>HTTP server + page<br/>[http_api.rs]"]
   node_api["JSON command parser<br/>API validation<br/>[api.rs]"]
-  node_page["Control page<br/>Win95 / plain themes<br/>[web/index.html]"]
+  node_page["Control page<br/>Win95 / WinXP / CSS-less themes<br/>[web/index.html]"]
 end
 
 subgraph group_controller["Rust controller"]
@@ -374,16 +374,19 @@ dependency.
 | Served at | `GET /` and `GET /index.html` |
 | Content type | `text/html; charset=utf-8` |
 | External requests | none (no CDN, fonts, or images) |
-| Themes | Win95 (default) and plain CSS-less |
+| Themes | Win95 (default), Windows XP, and CSS-less |
 
-The two themes are the same markup with different styling:
+The three themes use the same markup with different styling:
 
 | Theme | Behavior |
 |-------|----------|
 | `win95` | Classic Windows 95 look: beveled panels, chunky buttons, monospace system font. Selected by default. |
-| `plain` | No CSS rules apply at all. Raw HTML, no layout, no colors. |
+| `winxp` | Windows XP look: blue title bar, rounded window, Luna-inspired controls, and a desktop background. |
+| `plain` | No CSS rules apply at all. Raw HTML, no layout, no colors; the close control is labeled `Quit server`. |
 
-The toggle is a single button in the page header. The choice is written to
+The title bar has a close button that quits the server; hover it to see the
+action before clicking. The theme toggle cycles through all three options. The
+choice is written to
 `localStorage` under the key `rustctl-theme` and restored on the next page
 load, so the browser remembers it across reloads and restarts. Switching
 themes only toggles a `data-theme` attribute on the document element; no
@@ -637,7 +640,7 @@ process can access GPIO:
 ```text
 == Site mode ==
 [>] http://127.0.0.1:8080/
-[>] hardware_enabled=false | routes=/,/status,/help,/test,/args,/raw,/api
+[>] hardware_enabled=false | routes=/,/status,/help,/test,/args,/raw,/api,/quit
 [!] Simulation build: no GPIO signals will be sent. Rebuild with --features hardware on the Pi.
 ```
 
@@ -680,6 +683,7 @@ closes the TCP connection after one request. HTTP clients normally set
 | `POST` | `/args` | JSON object | Convert a Cartesian target using inverse kinematics, then execute it. |
 | `POST` | `/raw` | JSON object | Execute supplied joint angles without inverse kinematics. |
 | `POST` | `/api` | JSON object | Use the `command` field to select any API operation. |
+| `POST` | `/quit` | empty | Stop accepting requests and quit the server after active moves finish. |
 
 Paths may contain a query string. Routing ignores the query part, so
 `/status?format=json` is equivalent to `/status`. Motion requests use named JSON
@@ -802,8 +806,10 @@ curl -X POST http://127.0.0.1:8080/api -H 'Content-Type: application/json' --dat
 ```
 
 `position` is accepted as a case-insensitive alias for `args`. `tests` is an
-alias for `test`, and `quit`/`exit` return a JSON bye response; they do not shut
-down the HTTP server because each request is handled independently.
+alias for `test`. The `quit`/`exit` commands sent to `/api` return a JSON bye
+response. To stop site mode, send an empty `POST /quit`; the server stops
+accepting requests and waits for active moves to finish before exiting. The
+control page's title-bar close button calls this endpoint.
 
 #### Runtime tests and status updates
 

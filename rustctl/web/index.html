@@ -21,18 +21,64 @@ html[data-theme="win95"] {
   font-size: 12px;
 }
 html[data-theme="win95"] body {
-  background: var(--face);
+  background: #008080;
   color: var(--ink);
   margin: 0;
-  padding: 6px;
+  min-height: 100vh;
+  padding: 24px;
+  box-sizing: border-box;
 }
-html[data-theme="win95"] h1 {
+html[data-theme="win95"] .app-window {
+  background: var(--face);
+  border: 2px solid;
+  border-color: var(--face-light) var(--shadow) var(--shadow) var(--face-light);
+  box-shadow: 2px 2px 0 #000000;
+  margin: 0 auto;
+  max-width: 1100px;
+}
+html[data-theme="win95"] .titlebar {
+  align-items: center;
   background: linear-gradient(90deg, var(--title-a1), var(--title-a2));
   color: #ffffff;
+  display: flex;
+  gap: 6px;
+  padding: 3px 4px 3px 7px;
+}
+html[data-theme="win95"] .titlebar h1 {
+  color: #ffffff;
+  flex: 1;
   font-size: 14px;
   font-weight: bold;
-  margin: 0 0 6px;
-  padding: 4px 6px;
+  margin: 0;
+}
+html[data-theme="win95"] .app-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+html[data-theme="win95"] .window-content {
+  padding: 6px;
+}
+html[data-theme="win95"] #quit {
+  background: var(--face);
+  border: 2px solid;
+  border-color: var(--face-light) var(--shadow) var(--shadow) var(--face-light);
+  color: #000000;
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+  font-weight: bold;
+  line-height: 15px;
+  min-width: 22px;
+  padding: 0;
+  width: 22px;
+}
+html[data-theme="win95"] #quit:hover {
+  background: #c00000;
+  border-color: #ffb0b0 #600000 #600000 #ffb0b0;
+  color: #ffffff;
+  text-shadow: 1px 1px #600000;
+}
+html[data-theme="win95"] #quit:active {
+  border-color: var(--shadow) var(--face-light) var(--face-light) var(--shadow);
 }
 html[data-theme="win95"] .window {
   background: var(--face);
@@ -118,11 +164,180 @@ html[data-theme="win95"] pre {
 html[data-theme="win95"] .hint {
   color: var(--ink-muted);
 }
+
+html[data-theme="winxp"] {
+  --face: #ece9d8;
+  --face-light: #ffffff;
+  --face-dark: #aca899;
+  --ink: #1b1b1b;
+  --ink-muted: #4e4a41;
+  --field: #ffffff;
+  font-family: Tahoma, Verdana, Geneva, sans-serif;
+  font-size: 12px;
+}
+html[data-theme="winxp"] body {
+  background: linear-gradient(180deg, #3a8edb 0%, #b6e4fb 58%, #9dcc62 59%, #4e9136 100%);
+  color: var(--ink);
+  margin: 0;
+  min-height: 100vh;
+  padding: 24px;
+  box-sizing: border-box;
+}
+html[data-theme="winxp"] .app-window {
+  background: var(--face);
+  border: 1px solid #0b2e78;
+  border-radius: 8px 8px 3px 3px;
+  box-shadow: 0 12px 30px rgba(0, 23, 65, .45);
+  margin: 0 auto;
+  max-width: 1100px;
+  overflow: hidden;
+}
+html[data-theme="winxp"] .titlebar {
+  align-items: center;
+  background: linear-gradient(180deg, #6cb8ff 0%, #3689ed 14%, #1265d5 54%, #0754c8 55%, #2d83ef 100%);
+  border-bottom: 1px solid #0642a8;
+  color: #ffffff;
+  display: flex;
+  gap: 7px;
+  padding: 6px 7px 7px 10px;
+  text-shadow: 1px 1px #12458b;
+}
+html[data-theme="winxp"] .titlebar h1 {
+  color: #ffffff;
+  flex: 1;
+  font-size: 14px;
+  font-weight: bold;
+  margin: 0;
+}
+html[data-theme="winxp"] .app-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+html[data-theme="winxp"] .window-content {
+  padding: 9px;
+}
+html[data-theme="winxp"] #quit {
+  background: linear-gradient(180deg, #ffb9a8 0%, #ef4f36 45%, #c82112 100%);
+  border: 1px solid #ffffff;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px #a81e15, 0 1px 2px rgba(0, 0, 0, .35);
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  font-size: 16px;
+  font-weight: bold;
+  line-height: 17px;
+  min-width: 24px;
+  padding: 0;
+  width: 24px;
+}
+html[data-theme="winxp"] #quit:hover {
+  background: linear-gradient(180deg, #ffd3c4 0%, #ff654c 45%, #e22c1d 100%);
+  box-shadow: inset 0 0 0 1px #a81e15, 0 0 0 2px #ffd4a8, 0 2px 5px rgba(0, 0, 0, .45);
+  transform: scale(1.06);
+}
+html[data-theme="winxp"] #quit:active {
+  background: linear-gradient(180deg, #ba2318, #ed5740);
+}
+html[data-theme="winxp"] .window {
+  background: #f4f2e8;
+  border: 1px solid #b7b4a7;
+  border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12);
+  margin-bottom: 9px;
+  padding: 8px;
+}
+html[data-theme="winxp"] .window > h2 {
+  background: linear-gradient(180deg, #ffffff, #dce8f6);
+  border-bottom: 1px solid #b9c9dd;
+  color: #174a88;
+  font-size: 12px;
+  font-weight: bold;
+  margin: -8px -8px 8px;
+  padding: 5px 8px;
+}
+html[data-theme="winxp"] fieldset {
+  border: 1px solid #b8b5a8;
+  border-radius: 3px;
+  margin: 0 0 8px;
+  padding: 7px;
+}
+html[data-theme="winxp"] legend {
+  color: #315782;
+  font-weight: bold;
+  padding: 0 4px;
+}
+html[data-theme="winxp"] p {
+  margin: 0 0 7px;
+}
+html[data-theme="winxp"] label {
+  display: block;
+}
+html[data-theme="winxp"] input[type="number"] {
+  background: var(--field);
+  border: 1px solid #7f9db9;
+  border-radius: 2px;
+  padding: 3px 4px;
+  width: 9em;
+}
+html[data-theme="winxp"] input[type="checkbox"] {
+  vertical-align: middle;
+}
+html[data-theme="winxp"] button {
+  background: linear-gradient(180deg, #ffffff, #e5e4dc 50%, #d6d4c8);
+  border: 1px solid #7f9db9;
+  border-radius: 3px;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  min-width: 7em;
+  padding: 4px 10px;
+}
+html[data-theme="winxp"] button:hover:not(:disabled) {
+  background: linear-gradient(180deg, #fff9dd, #ffe9a8);
+  border-color: #e5a500;
+}
+html[data-theme="winxp"] button:active:not(:disabled) {
+  background: #e1dfd3;
+  box-shadow: inset 1px 1px 2px rgba(0, 0, 0, .28);
+}
+html[data-theme="winxp"] button:disabled {
+  color: var(--face-dark);
+}
+html[data-theme="winxp"] .toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+html[data-theme="winxp"] .status {
+  font-weight: bold;
+}
+html[data-theme="winxp"] pre {
+  background: var(--field);
+  border: 1px solid #7f9db9;
+  margin: 0;
+  max-height: 22em;
+  overflow: auto;
+  padding: 7px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+html[data-theme="winxp"] .hint {
+  color: var(--ink-muted);
+}
 </style>
 </head>
 <body>
 
+<div class="desktop">
+<main class="app-window">
+<header class="titlebar">
+<span class="app-icon" aria-hidden="true">⚙</span>
 <h1>Roboterarm HASE</h1>
+<button type="button" id="quit" title="Quit the rustctl server on this Raspberry Pi" aria-label="Quit server">×</button>
+</header>
+<div class="window-content">
 
 <div class="window">
 <h2>Status</h2>
@@ -188,11 +403,15 @@ html[data-theme="win95"] .hint {
 <pre id="out"></pre>
 </div>
 
+</div>
+</main>
+</div>
+
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
 const THEME_KEY = "rustctl-theme";
-const THEMES = ["win95", "plain"];
+const THEMES = ["win95", "winxp", "plain"];
 let locked = 0;
 
 function log(title, text) {
@@ -215,7 +434,8 @@ function recall(key) {
 function applyTheme(name) {
   const theme = THEMES.includes(name) ? name : "win95";
   document.documentElement.setAttribute("data-theme", theme);
-  $("theme").textContent = "Theme: " + (theme === "win95" ? "Win95" : "CSS-less");
+  $("theme").textContent = "Theme: " + (theme === "win95" ? "Win95" : theme === "winxp" ? "WinXP" : "CSS-less");
+  $("quit").textContent = theme === "plain" ? "Quit server" : "×";
   store(THEME_KEY, theme);
 }
 
@@ -267,7 +487,12 @@ for (const form of document.querySelectorAll("form[data-path]")) {
 $("refresh").addEventListener("click", refresh);
 $("selftest").addEventListener("click", () => call("GET", "/test"));
 $("theme").addEventListener("click", () => {
-  applyTheme(document.documentElement.getAttribute("data-theme") === "win95" ? "plain" : "win95");
+  const current = document.documentElement.getAttribute("data-theme");
+  applyTheme(THEMES[(THEMES.indexOf(current) + 1) % THEMES.length]);
+});
+$("quit").addEventListener("click", async () => {
+  const result = await call("POST", "/quit");
+  if (result && result.ok) $("status").textContent = "server shutting down";
 });
 applyTheme(recall(THEME_KEY) || "win95");
 refresh();
