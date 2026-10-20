@@ -32,6 +32,27 @@ impl RunningSite {
         self.child.kill().ok();
         self.child.wait().ok();
     }
+
+    fn wait_for_success(mut self) -> String {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = self.child.try_wait().expect("failed to check site process") {
+                assert!(
+                    status.success(),
+                    "site exited unsuccessfully: {}",
+                    self.joined()
+                );
+                return self.joined();
+            }
+            if std::time::Instant::now() >= deadline {
+                let log = self.joined();
+                self.child.kill().ok();
+                self.child.wait().ok();
+                panic!("site did not shut down after /quit: {log}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 fn pump_lines(
@@ -194,6 +215,45 @@ fn e2e_site_serves_the_control_page_with_both_themes() {
 }
 
 #[test]
+fn e2e_quit_route_shuts_the_site_down_cleanly() {
+    let site = run_site_and_capture(|command| {
+        command
+            .env_remove("RUSTCTL_SITE_ADDR")
+            .env("RUSTCTL_API_ADDR", "127.0.0.1:0")
+    });
+    let port = site.listening_port().unwrap_or_else(|| {
+        panic!(
+            "could not find a listening port in banner: {}",
+            site.joined()
+        )
+    });
+    thread::sleep(Duration::from_millis(150));
+
+    let method = request(port, b"GET /quit HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        method.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"),
+        "{method}"
+    );
+
+    let body = json_post(port, "/quit", "x");
+    assert!(body.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{body}");
+
+    let mut disconnected = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    disconnected
+        .write_all(b"GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    disconnected.shutdown(std::net::Shutdown::Both).unwrap();
+
+    let quit = json_post(port, "/quit", "");
+    assert!(quit.starts_with("HTTP/1.1 200 OK\r\n"), "{quit}");
+    assert!(quit.contains("shutting_down"), "{quit}");
+
+    let log = site.wait_for_success();
+    assert!(log.contains("Site mode"), "{log}");
+    assert!(log.contains("RUSTCTL_API_ADDR is deprecated"), "{log}");
+}
+
+#[test]
 fn e2e_site_rejects_a_partial_start_position() {
     let site = run_site_and_capture(|command| command.env("RUSTCTL_SITE_ADDR", "127.0.0.1:0"));
     let port = site.listening_port().unwrap_or_else(|| {
@@ -306,6 +366,29 @@ fn e2e_raw_mode_executes_a_relative_command() {
     assert!(stdout.contains("Raw mode"), "{stdout}");
     assert!(stdout.contains("Command completed"), "{stdout}");
     assert!(stdout.contains("Start position"), "{stdout}");
+}
+
+#[test]
+fn e2e_cli_mode_reads_position_from_stdin() {
+    let mut child = rustctl_command()
+        .arg("--cli")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to launch `rustctl --cli`");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"100\n0\n50\n200\n200\n200\n16\n1\n")
+        .unwrap();
+
+    let output = child.wait_with_output().expect("CLI mode did not exit");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("CLI mode"), "{stdout}");
+    assert!(stdout.contains("Simulation only"), "{stdout}");
 }
 
 #[test]

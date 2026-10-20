@@ -888,6 +888,13 @@ cargo llvm-cov --summary-only
 cargo llvm-cov --html --open
 ```
 
+The latest default-build run on macOS reported **97.69% line coverage**,
+**95.61% region coverage**, and **99.24% function coverage**. Line coverage is
+100% in every Rust source module except `cli.rs` (90.54%), `shell.rs` (86.21%),
+and `http_api.rs` (98.05%). The Linux-only GPIO implementation enabled by the
+`hardware` feature is excluded on macOS, so it still needs coverage on a Linux
+Raspberry Pi or other suitable GPIO test hardware.
+
 ### 7.6 Running on a Raspberry Pi
 
 Build with hardware support on the Pi, then run the selected mode with GPIO access:

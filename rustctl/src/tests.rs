@@ -1,4 +1,4 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{BufRead, Cursor, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Mutex;
 use std::thread;
@@ -7,10 +7,13 @@ use std::time::Duration;
 use crate::cli::{get_mode, print_help, prompt_position_with_io};
 use crate::control::{BusyGuard, is_busy};
 use crate::http_api::{
-    PAGE_HTML, RequestError, handle_connection, handle_request, origin_is_trusted,
-    read_http_request,
+    PAGE_HTML, RequestError, banner_lines, handle_connection, handle_request,
+    origin_is_trusted, read_http_request, resolve_bind_address_with,
 };
-use crate::net::{Address, rank_addresses};
+use crate::net::{
+    Address, discover_addresses, hostname_url, rank_addresses, rank_ip_addresses,
+    read_hostname, read_hostname_from,
+};
 use crate::shell::{run_position_loop_with_io, run_raw_loop_with_io};
 
 static BUSY_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -166,11 +169,67 @@ fn runtime_tests_report_named_failures() {
     assert!(report.failures.is_empty());
 }
 
+#[test]
+fn runtime_check_report_collects_failure_details() {
+    let checks: [(&str, fn() -> Result<(), String>); 2] = [
+        ("passing_check", || Ok(())),
+        ("failing_check", || Err("expected synthetic failure".to_owned())),
+    ];
+    let report = report_runtime_checks(&checks);
+    assert_eq!(report.passed, 1);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.checks, vec!["passing_check", "failing_check"]);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].function, "failing_check");
+    assert_eq!(report.failures[0].message, "expected synthetic failure");
+}
+
+#[test]
+fn runtime_check_validators_cover_failure_messages() {
+    assert!(validate_ik_roundtrip(150.0, 40.0).is_ok());
+    assert!(validate_ik_roundtrip(151.0, 40.0)
+        .unwrap_err()
+        .contains("radius=151"));
+
+    assert!(validate_step_conversion(3200).is_ok());
+    assert!(validate_step_conversion(3199)
+        .unwrap_err()
+        .contains("got 3199"));
+
+    assert!(validate_timing_validation(Err("too fast".to_owned())).is_ok());
+    assert_eq!(
+        validate_timing_validation(Ok(7)).unwrap_err(),
+        "accepted invalid timing and returned 7"
+    );
+
+    assert!(validate_planner_totals([10, 5, 0]).is_ok());
+    assert!(validate_planner_totals([10, 4, 0])
+        .unwrap_err()
+        .contains("[10, 4, 0]"));
+
+    assert!(validate_relative_plan([20.0, 15.0, 20.0], [4, 2, 4], [2, 1, 2]).is_ok());
+    assert!(validate_relative_plan([0.0, 0.0, 0.0], [4, 2, 4], [2, 1, 2])
+        .unwrap_err()
+        .contains("joint deltas"));
+    assert!(validate_relative_plan([20.0, 15.0, 20.0], [1, 2, 3], [1, 0, 1])
+        .unwrap_err()
+        .contains("did not differ"));
+    assert!(validate_relative_plan([20.0, 15.0, 20.0], [10, 10, 10], [-20, -20, -20])
+        .unwrap_err()
+        .contains("not shorter"));
+
+    assert!(runtime_ik_solution(150.0, 30.0, 40.0, 120.0, 90.0).is_ok());
+    assert_eq!(
+        runtime_ik_solution(150.0, 30.0, 40.0, 0.0, 90.0).unwrap_err(),
+        "Link lengths must be positive"
+    );
+}
+
 fn approx(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-6
 }
 
-use crate::config::StartPosition;
+use crate::config::{MotionConfig, StartPosition};
 use crate::motion::{joint_deltas, plan_report, step_plan};
 
 #[test]
@@ -828,6 +887,35 @@ fn api_executes_valid_simulation_commands() {
 }
 
 #[test]
+fn api_motion_responses_report_execution_errors() {
+    let mut invalid_position = MotionConfig::new(-1.0, 0.0, 0.0, 100.0, 100.0, 200, 16, true);
+    invalid_position.total_time_us = 1083;
+    let args_response = api_command_response(ApiCommand::Args(invalid_position));
+    assert_eq!(args_response["ok"], false);
+    assert!(args_response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Radius X"));
+
+    let mut invalid_timing = MotionConfig::new(0.0, 0.0, 0.0, 1.0, 1.0, 200, 16, true);
+    invalid_timing.total_time_us = 0;
+    let raw_response = api_command_response(ApiCommand::Raw(
+        invalid_timing,
+        ArmSolution {
+            theta_base_deg: 0.0,
+            theta1_deg: 0.0,
+            theta2_deg: 0.0,
+            z_eff_mm: 0.0,
+        },
+    ));
+    assert_eq!(raw_response["ok"], false);
+    assert!(raw_response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("total_time"));
+}
+
+#[test]
 fn api_route_query_strings_do_not_change_routes() {
     assert_eq!(
         api_command_for_request("GET", "/status?format=json", ""),
@@ -962,6 +1050,151 @@ fn http_exchange(request: &[u8]) -> Vec<u8> {
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
     response
+}
+
+struct FailAtOperation {
+    fail_at: usize,
+    operations: usize,
+}
+
+impl FailAtOperation {
+    fn tick(&mut self) -> std::io::Result<()> {
+        if self.operations == self.fail_at {
+            return Err(std::io::Error::other("synthetic output failure"));
+        }
+        self.operations += 1;
+        Ok(())
+    }
+}
+
+impl Write for FailAtOperation {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.tick()?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tick()
+    }
+}
+
+struct RequestThenFailingWriter<'a> {
+    request: Cursor<Vec<u8>>,
+    output: &'a mut FailAtOperation,
+}
+
+impl Read for RequestThenFailingWriter<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.request.read(buffer)
+    }
+}
+
+impl Write for RequestThenFailingWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.output.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.output.flush()
+    }
+}
+
+fn exercise_writer_failures(
+    mut operation: impl FnMut(&mut FailAtOperation) -> Result<(), Box<dyn std::error::Error>>,
+) {
+    let mut saw_error = false;
+    for fail_at in 0..128 {
+        let mut writer = FailAtOperation {
+            fail_at,
+            operations: 0,
+        };
+        match operation(&mut writer) {
+            Ok(()) => return,
+            Err(_) => saw_error = true,
+        }
+    }
+    assert!(saw_error, "the writer was never asked to write or flush");
+    panic!("writer operation sweep did not reach a successful run");
+}
+
+struct FailingBufReader;
+
+impl Read for FailingBufReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("synthetic input failure"))
+    }
+}
+
+impl BufRead for FailingBufReader {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        Err(std::io::Error::other("synthetic input failure"))
+    }
+
+    fn consume(&mut self, _amount: usize) {}
+}
+
+#[test]
+fn cli_and_shell_propagate_input_and_output_errors() {
+    assert!(prompt_position_with_io(FailingBufReader, Vec::new()).is_err());
+    assert!(prompt_position_with_io(
+        FailingStartReader(Cursor::new(b"100\n0\n50\n200\n200\n200\n16\n1\n".to_vec())),
+        Vec::new(),
+    )
+    .is_err());
+    assert!(run_position_loop_with_io(FailingBufReader, Vec::new(), false).is_err());
+    assert!(run_position_loop_with_io(FailingBufReader, Vec::new(), true).is_err());
+    assert!(run_raw_loop_with_io(FailingBufReader, Vec::new()).is_err());
+
+    exercise_writer_failures(|writer| {
+        prompt_position_with_io(
+            Cursor::new(b"100\n0\n50\n200\n200\n200\n16\n1\n\n\n\n"),
+            writer,
+        )
+        .map(|_| ())
+    });
+    exercise_writer_failures(|writer| {
+        run_position_loop_with_io(Cursor::new(b"\ninvalid\n"), writer, false)
+    });
+    exercise_writer_failures(|writer| {
+        run_position_loop_with_io(
+            Cursor::new(b"100 0 50 200 200 200 16 1\n"),
+            writer,
+            false,
+        )
+    });
+    exercise_writer_failures(|writer| {
+        run_position_loop_with_io(Cursor::new(b"\n{\"command\":\"status\"}\n"), writer, true)
+    });
+    exercise_writer_failures(|writer| run_raw_loop_with_io(Cursor::new(b"\ninvalid\n"), writer));
+    exercise_writer_failures(|writer| {
+        run_raw_loop_with_io(Cursor::new(b"0 25 30 200 16 1\n"), writer)
+    });
+}
+
+struct FailingStartReader(Cursor<Vec<u8>>);
+
+impl Read for FailingStartReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.0.position() == self.0.get_ref().len() as u64 {
+            Err(std::io::Error::other("synthetic input failure"))
+        } else {
+            self.0.read(_buffer)
+        }
+    }
+}
+
+impl BufRead for FailingStartReader {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.0.position() == self.0.get_ref().len() as u64 {
+            Err(std::io::Error::other("synthetic input failure"))
+        } else {
+            self.0.fill_buf()
+        }
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.0.consume(amount);
+    }
 }
 
 #[test]
@@ -1269,6 +1502,29 @@ fn http_routes_return_expected_error_statuses() {
 }
 
 #[test]
+fn http_quit_route_checks_method_and_empty_body() {
+    let get = String::from_utf8(http_exchange(
+        b"GET /quit HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    ))
+    .unwrap();
+    assert!(get.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"), "{get}");
+
+    let post_body = String::from_utf8(http_exchange(
+        b"POST /quit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx",
+    ))
+    .unwrap();
+    assert!(post_body.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{post_body}");
+    assert!(post_body.contains("quit request body must be empty"), "{post_body}");
+
+    let post = String::from_utf8(http_exchange(
+        b"POST /quit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+    ))
+    .unwrap();
+    assert!(post.starts_with("HTTP/1.1 200 OK\r\n"), "{post}");
+    assert!(post.contains("shutting_down"), "{post}");
+}
+
+#[test]
 fn http_malformed_requests_return_bad_request() {
     let response = http_exchange(b"not an HTTP request\r\n\r\n");
     let response = String::from_utf8(response).unwrap();
@@ -1292,6 +1548,90 @@ fn http_rejects_unsupported_version_and_invalid_content_length() {
             .unwrap()
             .contains("invalid Content-Length")
     );
+}
+
+#[test]
+fn http_request_reader_rejects_non_utf8_headers_and_bodies() {
+    let mut invalid_header = Cursor::new(b"GET /status HTTP/1.1\r\nX-Name: \xff\r\n\r\n".to_vec());
+    assert_eq!(
+        read_http_request(&mut invalid_header).unwrap_err(),
+        RequestError::Malformed("invalid HTTP headers".to_owned())
+    );
+
+    let mut invalid_body = Cursor::new(
+        b"POST /api HTTP/1.1\r\nContent-Length: 1\r\n\r\n\xff".to_vec(),
+    );
+    assert_eq!(
+        read_http_request(&mut invalid_body).unwrap_err(),
+        RequestError::Malformed("request body is not UTF-8".to_owned())
+    );
+}
+
+struct FailingReader;
+
+impl Read for FailingReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("synthetic read failure"))
+    }
+}
+
+#[test]
+fn http_request_reader_reports_non_timeout_io_errors_as_malformed() {
+    assert_eq!(
+        read_http_request(&mut FailingReader).unwrap_err(),
+        RequestError::Malformed("synthetic read failure".to_owned())
+    );
+}
+
+struct FailAfterHeader(Cursor<Vec<u8>>);
+
+impl Read for FailAfterHeader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.0.position() == self.0.get_ref().len() as u64 {
+            Err(std::io::Error::other("synthetic body read failure"))
+        } else {
+            self.0.read(buffer)
+        }
+    }
+}
+
+#[test]
+fn http_request_reader_reports_body_io_errors_and_short_request_lines() {
+    let mut body_error = FailAfterHeader(Cursor::new(
+        b"POST /api HTTP/1.1\r\nContent-Length: 1\r\n\r\n".to_vec(),
+    ));
+    assert_eq!(
+        read_http_request(&mut body_error).unwrap_err(),
+        RequestError::Malformed("synthetic body read failure".to_owned())
+    );
+
+    for (raw, expected) in [
+        (&b"\r\n\r\n"[..], "missing HTTP method"),
+        (&b"GET\r\n\r\n"[..], "missing HTTP target"),
+        (&b"GET /status\r\n\r\n"[..], "missing HTTP version"),
+    ] {
+        let mut cursor = Cursor::new(raw.to_vec());
+        assert_eq!(
+            read_http_request(&mut cursor).unwrap_err(),
+            RequestError::Malformed(expected.to_owned())
+        );
+    }
+}
+
+#[test]
+fn http_response_writer_propagates_write_and_flush_errors() {
+    exercise_writer_failures(|writer| {
+        crate::http_api::write_http_response(writer, "200 OK", "text/plain", "body")
+    });
+    exercise_writer_failures(|writer| {
+        let mut stream = RequestThenFailingWriter {
+            request: Cursor::new(
+                b"POST /quit HTTP/1.1\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            ),
+            output: writer,
+        };
+        handle_request(&mut stream)
+    });
 }
 
 #[test]
@@ -1907,6 +2247,93 @@ fn net_dedups_duplicate_ip_addresses() {
 }
 
 #[test]
+fn net_orders_addresses_on_the_same_interface_by_ip() {
+    let ranked = rank_addresses(vec![
+        addr("eth0", [192, 168, 1, 20]),
+        addr("eth0", [192, 168, 1, 10]),
+    ]);
+    assert_eq!(
+        ranked,
+        vec![
+            addr("eth0", [192, 168, 1, 10]),
+            addr("eth0", [192, 168, 1, 20]),
+        ]
+    );
+}
+
+#[test]
 fn net_empty_input_yields_empty_output() {
     assert!(rank_addresses(vec![]).is_empty());
+}
+
+#[test]
+fn net_ip_discovery_keeps_ipv4_and_skips_ipv6() {
+    let ranked = rank_ip_addresses([
+        ("wlan0".to_owned(), "192.168.1.20".parse().unwrap()),
+        ("eth0".to_owned(), "192.168.1.10".parse().unwrap()),
+        ("eth0".to_owned(), "fe80::1".parse().unwrap()),
+    ]);
+    assert_eq!(ranked, vec![
+        addr("eth0", [192, 168, 1, 10]),
+        addr("wlan0", [192, 168, 1, 20]),
+    ]);
+}
+
+#[test]
+fn net_discovery_and_hostname_helpers_are_safe_for_host_state() {
+    let addresses = discover_addresses();
+    assert!(addresses.iter().all(|address| !address.ip.is_loopback()));
+    assert_eq!(read_hostname(), read_hostname_from(std::path::Path::new(
+        "/proc/sys/kernel/hostname",
+    )));
+
+    let path = std::env::temp_dir().join(format!("rustctl-hostname-{}", std::process::id()));
+    std::fs::write(&path, " robot-arm.local \n").unwrap();
+    assert_eq!(read_hostname_from(&path).as_deref(), Some("robot-arm.local"));
+    std::fs::write(&path, "  \n").unwrap();
+    assert_eq!(read_hostname_from(&path), None);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(read_hostname_from(&path), None);
+
+    assert_eq!(hostname_url("", 8080), None);
+    assert_eq!(hostname_url("robot-arm", 8080).as_deref(), Some("http://robot-arm.local:8080/"));
+    assert_eq!(hostname_url("robot-arm.example", 8080).as_deref(), Some("http://robot-arm.example:8080/"));
+}
+
+#[test]
+fn site_bind_address_and_banner_cover_all_display_modes() {
+    let lookup = |site: Option<&str>, old: Option<&str>| {
+        resolve_bind_address_with(|name| match name {
+            "RUSTCTL_SITE_ADDR" => site.map(str::to_owned),
+            "RUSTCTL_API_ADDR" => old.map(str::to_owned),
+            _ => None,
+        })
+    };
+    assert_eq!(lookup(Some(" 127.0.0.1:9000 "), Some("127.0.0.1:9001")), ("127.0.0.1:9000".to_owned(), false));
+    assert_eq!(lookup(Some("  "), Some(" 127.0.0.1:9001 ")), ("127.0.0.1:9001".to_owned(), true));
+    assert_eq!(lookup(None, Some("")), ("0.0.0.0:8080".to_owned(), false));
+    assert_eq!(lookup(None, None), ("0.0.0.0:8080".to_owned(), false));
+
+    let wildcard = "0.0.0.0:8080".parse().unwrap();
+    let no_network = banner_lines(wildcard, vec![], Some("".to_owned()), false).join("\n");
+    assert!(no_network.contains("loopback only"), "{no_network}");
+    assert!(no_network.contains("No network address found"), "{no_network}");
+    assert!(no_network.contains("Simulation build"), "{no_network}");
+
+    let network = banner_lines(
+        wildcard,
+        vec![addr("eth0", [192, 168, 1, 10])],
+        Some("robot-arm".to_owned()),
+        true,
+    )
+    .join("\n");
+    assert!(network.contains("http://192.168.1.10:8080/  (eth0)"), "{network}");
+    assert!(network.contains("robot-arm.local:8080"), "{network}");
+    assert!(!network.contains("Simulation build"), "{network}");
+
+    let no_hostname = banner_lines(wildcard, vec![], None, true).join("\n");
+    assert!(no_hostname.contains("loopback only"), "{no_hostname}");
+
+    let bound = banner_lines("127.0.0.1:1234".parse().unwrap(), vec![], None, true).join("\n");
+    assert!(bound.contains("http://127.0.0.1:1234/"), "{bound}");
 }

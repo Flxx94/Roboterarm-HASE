@@ -330,7 +330,6 @@ pub(crate) fn banner_lines(
 ) -> Vec<String> {
     let port = local_addr.port();
     let is_wildcard = local_addr.ip().is_unspecified();
-    let is_loopback = local_addr.ip().is_loopback();
 
     let mut urls: Vec<String> = Vec::new();
     if is_wildcard {
@@ -399,6 +398,22 @@ fn reap_finished_workers(workers: &mut Vec<thread::JoinHandle<()>>) {
     }
 }
 
+trait HttpListener {
+    fn accept(&self) -> io::Result<(TcpStream, SocketAddr)>;
+}
+
+impl HttpListener for TcpListener {
+    fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        TcpListener::accept(self)
+    }
+}
+
+fn report_connection_result(result: Result<(), Box<dyn std::error::Error>>) {
+    if let Err(error) = result {
+        eprintln!("{}", pretty::warning(&format!("connection error: {error}")));
+    }
+}
+
 pub(crate) fn run_api() -> Result<(), Box<dyn std::error::Error + 'static>> {
     let (address, deprecated) = resolve_bind_address();
     if deprecated {
@@ -412,6 +427,14 @@ pub(crate) fn run_api() -> Result<(), Box<dyn std::error::Error + 'static>> {
     startup_banner(listener.local_addr()?);
     io::stdout().flush()?;
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    serve_requests(&listener, shutdown_tx, shutdown_rx)
+}
+
+fn serve_requests(
+    listener: &impl HttpListener,
+    shutdown_tx: Sender<()>,
+    shutdown_rx: Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + 'static>> {
     let mut workers = Vec::new();
     loop {
         if shutdown_requested(&shutdown_rx) {
@@ -421,10 +444,10 @@ pub(crate) fn run_api() -> Result<(), Box<dyn std::error::Error + 'static>> {
             Ok((mut stream, _)) => {
                 let shutdown = shutdown_tx.clone();
                 workers.push(thread::spawn(move || {
-                    if let Err(error) = handle_connection_with_shutdown(&mut stream, Some(shutdown))
-                    {
-                        eprintln!("{}", pretty::warning(&format!("connection error: {error}")));
-                    }
+                    report_connection_result(handle_connection_with_shutdown(
+                        &mut stream,
+                        Some(shutdown),
+                    ));
                 }));
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -444,4 +467,51 @@ pub(crate) fn run_api() -> Result<(), Box<dyn std::error::Error + 'static>> {
         let _ = worker.join();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::*;
+
+    #[test]
+    fn server_loop_stops_for_a_queued_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        shutdown_tx.send(()).unwrap();
+        serve_requests(&listener, shutdown_tx, shutdown_rx).unwrap();
+    }
+
+    #[test]
+    fn shutdown_poll_accepts_messages_and_disconnected_senders() {
+        let (sender, receiver) = mpsc::channel();
+        assert!(!shutdown_requested(&receiver));
+        sender.send(()).unwrap();
+        assert!(shutdown_requested(&receiver));
+
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        assert!(shutdown_requested(&receiver));
+    }
+
+    struct FailingListener(Sender<()>);
+
+    impl HttpListener for FailingListener {
+        fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+            self.0.send(()).unwrap();
+            Err(io::Error::other("synthetic accept failure"))
+        }
+    }
+
+    #[test]
+    fn server_loop_survives_a_listener_error_and_logs_worker_errors() {
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        serve_requests(
+            &FailingListener(shutdown_tx.clone()),
+            shutdown_tx,
+            shutdown_rx,
+        )
+        .unwrap();
+        report_connection_result(Err(io::Error::other("synthetic connection failure").into()));
+    }
 }

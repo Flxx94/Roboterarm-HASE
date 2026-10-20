@@ -141,35 +141,96 @@ pub(crate) fn parse_api_request(
     }
 }
 
+pub(crate) type RuntimeCheck = (&'static str, fn() -> Result<(), String>);
+
+pub(crate) fn report_runtime_checks(tests: &[RuntimeCheck]) -> RuntimeTestReport {
+    let mut failures = Vec::new();
+    for &(function, test) in tests {
+        if let Err(message) = test() {
+            failures.push(RuntimeTestFailure { function, message });
+        }
+    }
+    RuntimeTestReport {
+        passed: tests.len() - failures.len(),
+        failed: failures.len(),
+        checks: tests.iter().map(|(function, _)| *function).collect(),
+        failures,
+    }
+}
+
+pub(crate) fn validate_ik_roundtrip(radius: f64, height: f64) -> Result<(), String> {
+    if (radius - 150.0).abs() > 1e-6 || (height - 40.0).abs() > 1e-6 {
+        Err(format!(
+            "forward result was radius={radius}, height={height}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_step_conversion(steps: i64) -> Result<(), String> {
+    if steps != 3200 {
+        Err(format!("expected 3200 steps, got {steps}"))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_timing_validation(result: Result<u64, String>) -> Result<(), String> {
+    match result {
+        Ok(value) => Err(format!("accepted invalid timing and returned {value}")),
+        Err(_) => Ok(()),
+    }
+}
+
+pub(crate) fn validate_planner_totals(totals: [i64; 3]) -> Result<(), String> {
+    if totals != [10, 5, 0] {
+        Err(format!("planner totals were {totals:?}"))
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_relative_plan(
+    deltas: [f64; 3],
+    absolute: [i64; 3],
+    relative: [i64; 3],
+) -> Result<(), String> {
+    if deltas != [20.0, 15.0, 20.0] {
+        return Err(format!("joint deltas were {deltas:?}"));
+    }
+    if absolute.iter().zip(relative).any(|(a, r)| a - r == 0) {
+        return Err(format!(
+            "relative steps {relative:?} did not differ from absolute steps {absolute:?}"
+        ));
+    }
+    if relative
+        .iter()
+        .zip(absolute)
+        .any(|(r, a)| r.abs() >= a.abs())
+    {
+        return Err(format!(
+            "relative steps {relative:?} were not shorter than absolute steps {absolute:?}"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn runtime_test_report() -> RuntimeTestReport {
-    let tests: [(&str, fn() -> Result<(), String>); 5] = [
+    let tests: [RuntimeCheck; 5] = [
         ("runtime_test_ik_roundtrip", || {
-            let solution =
-                ik_angles_3d_deg(150.0, 30.0, 40.0, 120.0, 90.0).map_err(str::to_owned)?;
+            let solution = runtime_ik_solution(150.0, 30.0, 40.0, 120.0, 90.0)?;
             let (radius, height) =
                 forward_r_z_mm(solution.theta1_deg, solution.theta2_deg, 120.0, 90.0);
-            if (radius - 150.0).abs() > 1e-6 || (height - 40.0).abs() > 1e-6 {
-                return Err(format!(
-                    "forward result was radius={radius}, height={height}"
-                ));
-            }
-            Ok(())
+            validate_ik_roundtrip(radius, height)
         }),
         ("runtime_test_step_conversion", || {
             let steps = deg_to_steps(360.0, 200, 1, GEAR_RATIO);
-            if steps != 3200 {
-                Err(format!("expected 3200 steps, got {steps}"))
-            } else {
-                Ok(())
-            }
+            validate_step_conversion(steps)
         }),
-        (
-            "runtime_test_timing_validation",
-            || match overhead_sleep_us(482, 200) {
-                Ok(value) => Err(format!("accepted invalid timing and returned {value}")),
-                Err(_) => Ok(()),
-            },
-        ),
+        ("runtime_test_timing_validation", || {
+            validate_timing_validation(overhead_sleep_us(482, 200))
+        }),
         ("runtime_test_multi_axis_planner", || {
             let mut totals = [0; 3];
             for pulse in MultiAxisPlanner::new([10, 5, 0]) {
@@ -179,11 +240,7 @@ pub(crate) fn runtime_test_report() -> RuntimeTestReport {
                     }
                 }
             }
-            if totals != [10, 5, 0] {
-                Err(format!("planner totals were {totals:?}"))
-            } else {
-                Ok(())
-            }
+            validate_planner_totals(totals)
         }),
         ("runtime_test_start_position_is_relative", || {
             let solution = ArmSolution {
@@ -201,38 +258,20 @@ pub(crate) fn runtime_test_report() -> RuntimeTestReport {
             };
             let relative = step_plan(&config, solution);
             let deltas = crate::motion::joint_deltas(config.start, solution);
-            if deltas != [20.0, 15.0, 20.0] {
-                return Err(format!("joint deltas were {deltas:?}"));
-            }
-            if absolute.iter().zip(relative).any(|(a, r)| a - r == 0) {
-                return Err(format!(
-                    "relative steps {relative:?} did not differ from absolute steps {absolute:?}"
-                ));
-            }
-            if relative
-                .iter()
-                .zip(absolute)
-                .any(|(r, a)| r.abs() >= a.abs())
-            {
-                return Err(format!(
-                    "relative steps {relative:?} were not shorter than absolute steps {absolute:?}"
-                ));
-            }
-            Ok(())
+            validate_relative_plan(deltas, absolute, relative)
         }),
     ];
-    let mut failures = Vec::new();
-    for (function, test) in tests {
-        if let Err(message) = test() {
-            failures.push(RuntimeTestFailure { function, message });
-        }
-    }
-    RuntimeTestReport {
-        passed: tests.len() - failures.len(),
-        failed: failures.len(),
-        checks: tests.iter().map(|(function, _)| *function).collect(),
-        failures,
-    }
+    report_runtime_checks(&tests)
+}
+
+pub(crate) fn runtime_ik_solution(
+    radius: f64,
+    base_angle: f64,
+    height: f64,
+    l1: f64,
+    l2: f64,
+) -> Result<ArmSolution, String> {
+    ik_angles_3d_deg(radius, base_angle, height, l1, l2).map_err(str::to_owned)
 }
 
 pub(crate) fn api_command_response(command: ApiCommand) -> Value {

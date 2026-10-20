@@ -1,4 +1,5 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Address {
@@ -41,24 +42,34 @@ pub(crate) fn rank_addresses(mut candidates: Vec<Address>) -> Vec<Address> {
 
 pub(crate) fn discover_addresses() -> Vec<Address> {
     let ifaces = if_addrs::get_if_addrs().unwrap_or_default();
-    let candidates = ifaces
+    rank_ip_addresses(ifaces.into_iter().map(|iface| {
+        let ip = iface.ip();
+        (iface.name, ip)
+    }))
+}
+
+pub(crate) fn rank_ip_addresses(
+    candidates: impl IntoIterator<Item = (String, IpAddr)>,
+) -> Vec<Address> {
+    let candidates = candidates
         .into_iter()
-        .filter_map(|iface| match iface.ip() {
-            std::net::IpAddr::V4(ip) => Some(Address {
-                interface: iface.name,
-                ip,
-            }),
+        .filter_map(|(interface, ip)| match ip {
+            IpAddr::V4(ip) => Some(Address { interface, ip }),
             std::net::IpAddr::V6(_) => None,
         })
         .collect();
     rank_addresses(candidates)
 }
 
-pub(crate) fn read_hostname() -> Option<String> {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
+pub(crate) fn read_hostname_from(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn read_hostname() -> Option<String> {
+    read_hostname_from(Path::new("/proc/sys/kernel/hostname"))
 }
 
 pub(crate) fn hostname_url(hostname: &str, port: u16) -> Option<String> {
