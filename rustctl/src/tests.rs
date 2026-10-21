@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::cli::{get_mode, print_help, prompt_position_with_io};
 use crate::control::{BusyGuard, is_busy};
 use crate::http_api::{
-    PAGE_HTML, RequestError, banner_lines, handle_connection, handle_request,
+    PAGE_HTML, RequestError, banner_lines,
     origin_is_trusted, read_http_request, resolve_bind_address_with,
 };
 use crate::net::{
