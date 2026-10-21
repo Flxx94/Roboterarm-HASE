@@ -197,10 +197,6 @@ pub(crate) fn origin_is_trusted(origin: Option<&str>, host: Option<&str>) -> boo
     }
 }
 
-pub(crate) fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
-    handle_connection_with_shutdown(&mut stream, None)
-}
-
 fn handle_connection_with_shutdown(
     stream: &mut TcpStream,
     shutdown: Option<Sender<()>>,
@@ -208,12 +204,6 @@ fn handle_connection_with_shutdown(
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     handle_request_with_shutdown(stream, shutdown)
-}
-
-pub(crate) fn handle_request(
-    stream: &mut (impl Read + Write),
-) -> Result<(), Box<dyn std::error::Error>> {
-    handle_request_with_shutdown(stream, None)
 }
 
 fn handle_request_with_shutdown(
