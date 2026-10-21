@@ -371,6 +371,7 @@ dependency.
 | Content type | `text/html; charset=utf-8` |
 | External requests | none (no CDN, fonts, or images) |
 | Themes | Win95 (default), Windows XP, Windows 10, macOS, and CSS-less |
+| 3D preview | Interactive WebGL model, rendered locally from the entered link lengths and joint pose |
 
 The five themes use the same markup with different styling:
 
@@ -394,6 +395,13 @@ and both accept the optional start position described in
 [7.3 CLI Modes](#73-cli-modes). Leaving the three start fields at `0` means the
 arm is homed and the target is absolute; entering the current joint angles makes
 the move relative to that pose.
+
+The **3D arm preview** follows the selected form's target pose. Drag the model
+to orbit it and scroll to zoom. During a move, the page animates the model from
+the supplied start angles to the target and shows estimated progress from the
+planned step count and fixed step period. The API reports only when a move has
+finished, so this percentage is a client-side estimate rather than live motor
+feedback; simulation builds are labeled separately.
 
 ### 4.6 Image and Build Tools
 
@@ -969,9 +977,6 @@ stop the current hardware operation safely.
 
 - **Computer vision pick-and-place**  
   Attach a [Raspberry Pi Camera Module 3](https://www.raspberrypi.com/products/camera-module-3/) and run an object detection model (e.g. [YOLOv8](https://docs.ultralytics.com/)) to autonomously locate and grasp objects placed in the arm's workspace.
-
-- **Web-based 3D simulation**  
-  Create a complete kinematic model of the arm and render its commanded pose in the browser alongside the control UI, using a format such as [URDF](https://wiki.ros.org/urdf) or [GLTF](https://www.khronos.org/gltf/).
 
 - **Custom motor controller PCB**  
   Design a Raspberry Pi HAT that integrates all four A4988 drivers, decoupling capacitors, the reset circuit, and status LEDs in a single board — replacing the current breadboard setup with a compact, reliable solution.

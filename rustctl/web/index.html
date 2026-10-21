@@ -658,6 +658,81 @@ html[data-theme="macos"] select {
   margin-left: 4px;
   padding: 5px 24px 5px 7px;
 }
+
+html:not([data-theme="plain"]) .preview-layout {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+}
+html:not([data-theme="plain"]) #arm-view {
+  background: #111a26;
+  border: 1px solid #596579;
+  box-sizing: border-box;
+  display: block;
+  height: min(52vh, 440px);
+  min-height: 260px;
+  touch-action: none;
+  width: 100%;
+}
+html:not([data-theme="plain"]) .preview-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  justify-content: space-between;
+  margin-top: 7px;
+}
+html:not([data-theme="plain"]) .joint-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0;
+  padding: 0;
+}
+html:not([data-theme="plain"]) .joint-legend li {
+  list-style: none;
+}
+html:not([data-theme="plain"]) .legend-dot {
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  display: inline-block;
+  height: .8em;
+  margin-right: 4px;
+  vertical-align: -.08em;
+  width: .8em;
+}
+html:not([data-theme="plain"]) .legend-base { background: #aab4c2; }
+html:not([data-theme="plain"]) .legend-shoulder { background: #38a5ff; }
+html:not([data-theme="plain"]) .legend-elbow { background: #ffae57; }
+html:not([data-theme="plain"]) .legend-tool { background: #e5e9ef; }
+html:not([data-theme="plain"]) .progress-panel {
+  margin-top: 8px;
+}
+html:not([data-theme="plain"]) .progress-heading {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+html:not([data-theme="plain"]) .progress-heading output {
+  font-weight: bold;
+}
+html:not([data-theme="plain"]) #move-progress {
+  display: block;
+  height: 16px;
+  margin: 4px 0;
+  width: 100%;
+}
+html:not([data-theme="plain"]) .preview-hint {
+  margin-top: 5px;
+}
+html:not([data-theme="plain"]) #arm-readout {
+  min-height: 1.2em;
+}
+html[data-theme="win95"] #move-progress { accent-color: #000080; }
+html[data-theme="winxp"] #move-progress,
+html[data-theme="win10"] #move-progress { accent-color: #1674d1; }
+html[data-theme="macos"] #move-progress { accent-color: #0876df; }
 </style>
 </head>
 <body>
@@ -688,6 +763,34 @@ html[data-theme="macos"] select {
 </label>
 </p>
 </div>
+
+<section class="window" aria-labelledby="preview-title">
+<h2 id="preview-title">3D arm preview</h2>
+<div class="preview-layout">
+<canvas id="arm-view" aria-label="Interactive 3D rendering of the three-axis robotic arm">
+Your browser does not support the canvas element.
+</canvas>
+<div class="preview-meta">
+<output id="arm-readout" class="hint" aria-live="polite">Calculating pose…</output>
+<button type="button" id="reset-view">Reset view</button>
+<ul class="joint-legend" aria-label="Arm parts">
+<li><span class="legend-dot legend-base" aria-hidden="true"></span>Base</li>
+<li><span class="legend-dot legend-shoulder" aria-hidden="true"></span>Shoulder</li>
+<li><span class="legend-dot legend-elbow" aria-hidden="true"></span>Elbow</li>
+<li><span class="legend-dot legend-tool" aria-hidden="true"></span>End effector</li>
+</ul>
+</div>
+<p class="hint preview-hint">Drag to orbit · scroll to zoom · the preview follows the selected form’s target pose.</p>
+</div>
+<div id="progress-panel" class="progress-panel" hidden>
+<div class="progress-heading">
+<span id="progress-label">Move progress</span>
+<output id="progress-value">0%</output>
+</div>
+<progress id="move-progress" max="100" value="0" aria-label="Estimated move progress"></progress>
+<p id="progress-detail" class="hint" role="status" aria-live="polite">Waiting for a move.</p>
+</div>
+</section>
 
 <form id="args" data-path="/args" class="window">
 <h2>Move to position (inverse kinematics)</h2>
@@ -752,7 +855,12 @@ html[data-theme="macos"] select {
 const $ = (id) => document.getElementById(id);
 const THEME_KEY = "rustctl-theme";
 const THEMES = ["win95", "winxp", "win10", "macos", "plain"];
+const LINK_RATIO = 16;
+const STEP_PERIOD_US = 1083;
 let locked = 0;
+let armRenderer = null;
+let moveFrame = 0;
+let lastMoveForm = null;
 
 function log(title, text) {
   $("out").textContent = title + "\n" + text + "\n\n" + $("out").textContent;
@@ -760,7 +868,7 @@ function log(title, text) {
 
 function lock(on) {
   locked += on ? 1 : -1;
-  for (const b of document.querySelectorAll("form button")) b.disabled = locked > 0;
+  for (const control of document.querySelectorAll("form input, form button")) control.disabled = locked > 0;
 }
 
 function store(key, value) {
@@ -780,7 +888,10 @@ function applyTheme(name) {
 }
 
 async function call(method, path, body, motion) {
-  if (motion) lock(true);
+  if (motion) {
+    lock(true);
+    beginMoveProgress(path, body);
+  }
   try {
     const res = await fetch(path, {
       method,
@@ -789,9 +900,13 @@ async function call(method, path, body, motion) {
     });
     const text = await res.text();
     log(method + " " + path + " -> HTTP " + res.status, text);
-    try { return JSON.parse(text); } catch (_) { return null; }
+    let result = null;
+    try { result = JSON.parse(text); } catch (_) { /* response may not be JSON */ }
+    if (motion) finishMoveProgress(result, res.status);
+    return result;
   } catch (err) {
     log(method + " " + path + " failed", String(err));
+    if (motion) stopMoveProgress("Connection lost · motion status unknown");
     return null;
   } finally {
     if (motion) lock(false);
@@ -802,12 +917,133 @@ async function call(method, path, body, motion) {
 // case the full triple is sent and the controller moves relative to it.
 function formBody(form) {
   const body = {};
+  const start = {};
   for (const el of form.elements) {
     if (!el.name) continue;
-    if (el.name.startsWith("start_") && Number(el.value) === 0) continue;
+    if (el.name.startsWith("start_")) {
+      start[el.name] = el.value === "" ? 0 : Number(el.value);
+      continue;
+    }
     body[el.name] = el.type === "checkbox" ? el.checked : Number(el.value);
   }
+  if (Object.values(start).some((value) => value !== 0)) Object.assign(body, start);
   return body;
+}
+
+function numberValue(form, name) {
+  const value = Number(form.elements.namedItem(name).value);
+  if (!Number.isFinite(value)) throw new Error("Enter valid numbers for all pose fields.");
+  return value;
+}
+
+function kinematics(form, path, body) {
+  const start = {
+    base: body.start_base_deg || 0,
+    shoulder: body.start_axis1_deg || 0,
+    elbow: body.start_axis2_deg || 0,
+  };
+  let target;
+  let l1;
+  let l2;
+  if (path === "/raw") {
+    target = {
+      base: numberValue(form, "base_deg"),
+      shoulder: numberValue(form, "axis1_deg"),
+      elbow: numberValue(form, "axis2_deg"),
+    };
+    l1 = numberValue($("args"), "l1_mm");
+    l2 = numberValue($("args"), "l2_mm");
+  } else {
+    l1 = numberValue(form, "l1_mm");
+    l2 = numberValue(form, "l2_mm");
+    const radius = numberValue(form, "radius_mm");
+    const base = numberValue(form, "base_angle_deg");
+    const height = numberValue(form, "height_mm");
+    if (l1 <= 0 || l2 <= 0 || radius < 0) throw new Error("Link lengths must be positive and radius non-negative.");
+    const reach = Math.hypot(radius, height);
+    if (reach > l1 + l2 || reach < Math.abs(l1 - l2)) throw new Error("Target is outside the arm’s modeled workspace.");
+    const alpha = Math.atan2(height, radius);
+    const cosElbow = Math.max(-1, Math.min(1, (reach * reach - l1 * l1 - l2 * l2) / (2 * l1 * l2)));
+    const theta2 = Math.acos(cosElbow);
+    const theta1 = alpha - Math.atan2(l2 * Math.sin(theta2), l1 + l2 * Math.cos(theta2));
+    target = { base, shoulder: theta1 * 180 / Math.PI, elbow: theta2 * 180 / Math.PI };
+  }
+  if (l1 <= 0 || l2 <= 0) throw new Error("Link lengths must be positive.");
+  return { start, target, l1, l2 };
+}
+
+function previewForm(form) {
+  if (!armRenderer) return;
+  try {
+    const body = formBody(form);
+    const pose = kinematics(form, form.dataset.path, body);
+    armRenderer.setPose(pose.target, pose.l1, pose.l2);
+    $("arm-readout").textContent = "Base " + pose.target.base.toFixed(1) + "° · shoulder " + pose.target.shoulder.toFixed(1) + "° · elbow " + pose.target.elbow.toFixed(1) + "°";
+  } catch (err) {
+    $("arm-readout").textContent = err.message;
+  }
+}
+
+function showProgress(label, value, detail) {
+  $("progress-panel").hidden = false;
+  $("progress-label").textContent = label;
+  $("move-progress").value = Math.max(0, Math.min(100, value));
+  $("progress-value").textContent = Math.round(value) + "%";
+  if ($("progress-detail").textContent !== detail) $("progress-detail").textContent = detail;
+}
+
+function rustRound(value) {
+  return value < 0 ? -Math.round(-value) : Math.round(value);
+}
+
+function beginMoveProgress(path, body) {
+  const form = $(path === "/raw" ? "raw" : "args");
+  lastMoveForm = form;
+  try {
+    const pose = kinematics(form, path, body);
+    const stepsPerRev = numberValue(form, "steps_per_rev");
+    const microstep = numberValue(form, "microstep");
+    const deltas = [pose.target.shoulder - pose.start.shoulder, pose.target.elbow - pose.start.elbow, pose.target.base - pose.start.base];
+    const maxTicks = Math.max(...deltas.map((delta) => Math.abs(rustRound(delta * (stepsPerRev * microstep / 360) * LINK_RATIO))));
+    const estimateMs = maxTicks * STEP_PERIOD_US / 1000;
+    const startedAt = performance.now();
+    cancelAnimationFrame(moveFrame);
+    const animate = (now) => {
+      const fraction = estimateMs <= 0 ? 0.94 : Math.min(0.94, (now - startedAt) / estimateMs * 0.94);
+      showProgress("Estimated move progress", fraction * 100, "Controller is moving · estimated duration " + (estimateMs / 1000).toFixed(2) + " s");
+      moveFrame = requestAnimationFrame(animate);
+      const blend = estimateMs <= 0 ? 1 : Math.min(1, (now - startedAt) / estimateMs);
+      armRenderer?.setPose({
+        base: pose.start.base + deltas[2] * blend,
+        shoulder: pose.start.shoulder + deltas[0] * blend,
+        elbow: pose.start.elbow + deltas[1] * blend,
+      }, pose.l1, pose.l2);
+    };
+    showProgress("Estimated move progress", 0, "Controller is moving · estimated duration " + (estimateMs / 1000).toFixed(2) + " s");
+    armRenderer?.setPose(pose.start, pose.l1, pose.l2);
+    moveFrame = requestAnimationFrame(animate);
+  } catch (err) {
+    cancelAnimationFrame(moveFrame);
+    showProgress("Move progress", 0, "Could not estimate this move · " + err.message);
+  }
+}
+
+function finishMoveProgress(result, status) {
+  cancelAnimationFrame(moveFrame);
+  if (status === 409 || (result && result.busy)) {
+    showProgress("Move rejected", 0, "The controller is already busy.");
+  } else if (!result || !result.ok) {
+    const message = result && result.error && result.error.message ? result.error.message : "The controller did not accept the move.";
+    showProgress("Move not completed", 0, message);
+  } else {
+    showProgress(result.hardware_enabled ? "Move complete" : "Simulation complete", 100, result.hardware_enabled ? "Controller reported that the move finished." : "Simulation build · no motor pulses were sent.");
+  }
+  previewForm(lastMoveForm || $("args"));
+}
+
+function stopMoveProgress(detail) {
+  cancelAnimationFrame(moveFrame);
+  showProgress("Move status unavailable", $("move-progress").value, detail);
 }
 
 async function refresh() {
@@ -818,12 +1054,14 @@ async function refresh() {
 }
 
 for (const form of document.querySelectorAll("form[data-path]")) {
+  form.addEventListener("input", () => previewForm(form));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     await call("POST", form.dataset.path, formBody(form), true);
     await refresh();
   });
 }
+$("reset-view").addEventListener("click", () => armRenderer?.resetView());
 $("refresh").addEventListener("click", refresh);
 $("selftest").addEventListener("click", () => call("GET", "/test"));
 $("theme").addEventListener("change", () => applyTheme($("theme").value));
@@ -832,7 +1070,191 @@ $("quit").addEventListener("click", async () => {
   if (result && result.ok) $("status").textContent = "server shutting down";
 });
 applyTheme(recall(THEME_KEY) || "win95");
+armRenderer = createArmRenderer($("arm-view"));
+previewForm($("args"));
 refresh();
+
+function createArmRenderer(canvas) {
+  const gl = canvas.getContext("webgl", { antialias: true, alpha: false });
+  if (!gl) {
+    $("arm-readout").textContent = "WebGL is unavailable in this browser.";
+    return null;
+  }
+  const vertexSource = "attribute vec3 aPosition; attribute vec3 aNormal; uniform mat4 uMvp; uniform mat4 uModel; varying vec3 vNormal; void main(){ gl_Position=uMvp*vec4(aPosition,1.0); vNormal=mat3(uModel)*aNormal; }";
+  const fragmentSource = "precision mediump float; uniform vec3 uColor; uniform float uLit; varying vec3 vNormal; void main(){ float light=0.62+0.38*max(dot(normalize(vNormal),normalize(vec3(-0.4,0.8,0.5))),0.0); gl_FragColor=vec4(uColor*mix(1.0,light,uLit),1.0); }";
+  const compile = (type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    return shader;
+  };
+  let program;
+  try {
+    program = gl.createProgram();
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource));
+    gl.linkProgram(program);
+  } catch (_) {
+    $("arm-readout").textContent = "Could not initialize the 3D preview.";
+    return null;
+  }
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    $("arm-readout").textContent = "Could not initialize the 3D preview.";
+    return null;
+  }
+  gl.useProgram(program);
+  const locations = {
+    position: gl.getAttribLocation(program, "aPosition"),
+    normal: gl.getAttribLocation(program, "aNormal"),
+    mvp: gl.getUniformLocation(program, "uMvp"),
+    model: gl.getUniformLocation(program, "uModel"),
+    color: gl.getUniformLocation(program, "uColor"),
+    lit: gl.getUniformLocation(program, "uLit"),
+  };
+  const mesh = (vertices) => {
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+    return { buffer, count: vertices.length / 6 };
+  };
+  const sphereData = [];
+  for (let lat = 0; lat < 16; lat++) {
+    const a0 = Math.PI * lat / 16, a1 = Math.PI * (lat + 1) / 16;
+    for (let lon = 0; lon < 24; lon++) {
+      const b0 = 2 * Math.PI * lon / 24, b1 = 2 * Math.PI * (lon + 1) / 24;
+      const point = (a, b) => [Math.sin(a) * Math.cos(b), Math.cos(a), Math.sin(a) * Math.sin(b)];
+      const p00 = point(a0, b0), p10 = point(a1, b0), p11 = point(a1, b1), p01 = point(a0, b1);
+      for (const p of [p00, p10, p11, p00, p11, p01]) sphereData.push(...p, ...p);
+    }
+  }
+  const cylinderData = [];
+  const slices = 32;
+  for (let i = 0; i < slices; i++) {
+    const a = 2 * Math.PI * i / slices, b = 2 * Math.PI * (i + 1) / slices;
+    const p0 = [Math.cos(a), -0.5, Math.sin(a)], p1 = [Math.cos(b), -0.5, Math.sin(b)];
+    const p2 = [Math.cos(b), 0.5, Math.sin(b)], p3 = [Math.cos(a), 0.5, Math.sin(a)];
+    const n0 = [Math.cos(a), 0, Math.sin(a)], n1 = [Math.cos(b), 0, Math.sin(b)];
+    for (const [p, n] of [[p0,n0],[p1,n1],[p2,n1],[p0,n0],[p2,n1],[p3,n0]]) cylinderData.push(...p, ...n);
+    const bottom = [0,-0.5,0], top = [0,0.5,0], down = [0,-1,0], up = [0,1,0];
+    for (const [p,n] of [[bottom,down],[p1,down],[p0,down],[top,up],[p3,up],[p2,up]]) cylinderData.push(...p,...n);
+  }
+  const cubeData = [];
+  const faces = [
+    [[0,0,1],[-.5,-.5,.5],[.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5]],
+    [[0,0,-1],[.5,-.5,-.5],[-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5]],
+    [[1,0,0],[.5,-.5,.5],[.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5]],
+    [[-1,0,0],[-.5,-.5,-.5],[-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5]],
+    [[0,1,0],[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],[-.5,.5,-.5]],
+    [[0,-1,0],[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],[-.5,-.5,.5]],
+  ];
+  for (const [n,a,b,c,d] of faces) for (const p of [a,b,c,a,c,d]) cubeData.push(...p,...n);
+  const meshes = { sphere: mesh(sphereData), cylinder: mesh(cylinderData), cube: mesh(cubeData) };
+  const gridBuffer = gl.createBuffer();
+  const identity = () => [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+  const multiply = (a,b) => {
+    const out = new Array(16);
+    for (let col=0; col<4; col++) for (let row=0; row<4; row++) out[col*4+row] = a[row]*b[col*4] + a[4+row]*b[col*4+1] + a[8+row]*b[col*4+2] + a[12+row]*b[col*4+3];
+    return out;
+  };
+  const translate = (x,y,z) => { const m=identity(); m[12]=x; m[13]=y; m[14]=z; return m; };
+  const scale = (x,y,z) => [x,0,0,0, 0,y,0,0, 0,0,z,0, 0,0,0,1];
+  const rotateY = (a) => { const c=Math.cos(a),s=Math.sin(a); return [c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]; };
+  const rotateQuaternion = (q) => {
+    const [x,y,z,w]=q, xx=x*x, yy=y*y, zz=z*z, xy=x*y, xz=x*z, yz=y*z, wx=w*x, wy=w*y, wz=w*z;
+    return [1-2*(yy+zz),2*(xy+wz),2*(xz-wy),0, 2*(xy-wz),1-2*(xx+zz),2*(yz+wx),0, 2*(xz+wy),2*(yz-wx),1-2*(xx+yy),0, 0,0,0,1];
+  };
+  const perspective = (fovy,aspect,near,far) => { const f=1/Math.tan(fovy/2), nf=1/(near-far); return [f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,2*far*near*nf,0]; };
+  const lookAt = (eye,center,up) => {
+    const norm = (v) => { const l=Math.hypot(...v)||1; return v.map(x=>x/l); };
+    const cross = (a,b) => [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+    const z=norm(eye.map((x,i)=>x-center[i])), x=norm(cross(up,z)), y=cross(z,x);
+    return [x[0],y[0],z[0],0, x[1],y[1],z[1],0, x[2],y[2],z[2],0, -x.reduce((s,v,i)=>s+v*eye[i],0), -y.reduce((s,v,i)=>s+v*eye[i],0), -z.reduce((s,v,i)=>s+v*eye[i],0),1];
+  };
+  const unit = (v) => { const l=Math.hypot(...v)||1; return v.map(x=>x/l); };
+  const rotateFromUp = (direction) => {
+    const d=unit(direction), cross=[d[2],0,-d[0]], w=1+d[1];
+    if (w < 1e-7) return rotateQuaternion([1,0,0,0]);
+    const length=Math.hypot(...cross,w);
+    return rotateQuaternion([...cross.map(v=>v/length),w/length]);
+  };
+  let pose = { base:0, shoulder:0, elbow:0 }, armLengths = [500,525];
+  let yaw = 0.78, pitch = 0.42, distance = 2600, dragging = false, last = [0,0];
+  const defaultView = () => { yaw=0.78; pitch=0.42; distance=(armLengths[0]+armLengths[1])*2.65; };
+  const setPose = (nextPose,l1=armLengths[0],l2=armLengths[1]) => {
+    const dimensionsChanged = l1 !== armLengths[0] || l2 !== armLengths[1];
+    pose=nextPose; armLengths=[Math.max(1,l1),Math.max(1,l2)];
+    if (dimensionsChanged || !Number.isFinite(distance) || distance > (l1+l2)*7) defaultView();
+    draw();
+  };
+  const bindMesh = (item) => {
+    gl.bindBuffer(gl.ARRAY_BUFFER,item.buffer);
+    gl.enableVertexAttribArray(locations.position);
+    gl.enableVertexAttribArray(locations.normal);
+    gl.vertexAttribPointer(locations.position,3,gl.FLOAT,false,24,0);
+    gl.vertexAttribPointer(locations.normal,3,gl.FLOAT,false,24,12);
+  };
+  const drawMesh = (item,model,color,vp,lit=1) => {
+    bindMesh(item);
+    gl.uniformMatrix4fv(locations.model,false,new Float32Array(model));
+    gl.uniformMatrix4fv(locations.mvp,false,new Float32Array(multiply(vp,model)));
+    gl.uniform3fv(locations.color,new Float32Array(color));
+    gl.uniform1f(locations.lit,lit);
+    gl.drawArrays(gl.TRIANGLES,0,item.count);
+  };
+  const draw = () => {
+    const width=Math.max(1,canvas.clientWidth), height=Math.max(1,canvas.clientHeight), dpr=Math.min(2,window.devicePixelRatio||1);
+    if (canvas.width!==Math.round(width*dpr)||canvas.height!==Math.round(height*dpr)) { canvas.width=Math.round(width*dpr); canvas.height=Math.round(height*dpr); }
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.clearColor(0.055,0.085,0.125,1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT); gl.enable(gl.DEPTH_TEST);
+    const [l1,l2]=armLengths, reach=l1+l2, center=[0,reach*.36,0];
+    const eye=[center[0]+Math.sin(yaw)*Math.cos(pitch)*distance,center[1]+Math.sin(pitch)*distance,center[2]+Math.cos(yaw)*Math.cos(pitch)*distance];
+    const vp=multiply(perspective(Math.PI/4,canvas.width/canvas.height,1,distance*5),lookAt(eye,center,[0,1,0]));
+    const grid=[]; const span=Math.ceil(reach/200)*200;
+    for(let n=-span;n<=span;n+=100){ grid.push(n,0,-span,0,0,1, n,0,span,0,0,1, -span,0,n,0,0,1, span,0,n,0,0,1); }
+    gl.bindBuffer(gl.ARRAY_BUFFER,gridBuffer); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(grid),gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(locations.position); gl.enableVertexAttribArray(locations.normal);
+    gl.vertexAttribPointer(locations.position,3,gl.FLOAT,false,24,0); gl.vertexAttribPointer(locations.normal,3,gl.FLOAT,false,24,12);
+    gl.uniformMatrix4fv(locations.model,false,new Float32Array(identity())); gl.uniformMatrix4fv(locations.mvp,false,new Float32Array(vp)); gl.uniform1f(locations.lit,0);
+    gl.uniform3fv(locations.color,new Float32Array([0.18,0.25,0.34])); gl.drawArrays(gl.LINES,0,grid.length/6);
+    const baseAngle=pose.base*Math.PI/180, t1=pose.shoulder*Math.PI/180, t2=(pose.shoulder+pose.elbow)*Math.PI/180;
+    const baseHeight=reach*.075, baseRadius=reach*.105;
+    const point=(angle,length,origin) => [origin[0]+length*Math.cos(angle)*Math.cos(baseAngle),origin[1]+length*Math.sin(angle),origin[2]-length*Math.cos(angle)*Math.sin(baseAngle)];
+    const root=[0,baseHeight,0], shoulder=point(t1,l1,root), wrist=point(t2,l2,shoulder), tip=point(t2,l2+reach*.07,shoulder);
+    const part = (a,b,r,color) => {
+      const delta=b.map((v,i)=>v-a[i]), length=Math.hypot(...delta), qmat=rotateFromUp(delta);
+      drawMesh(meshes.cylinder,multiply(multiply(translate(...a.map((v,i)=>(v+b[i])/2)),qmat),scale(r,length,r)),color,vp);
+    };
+    const ball = (p,r,color) => drawMesh(meshes.sphere,multiply(translate(...p),scale(r,r,r)),color,vp);
+    const block = (p,sizes,color,angle=baseAngle) => drawMesh(meshes.cube,multiply(multiply(translate(...p),rotateY(angle)),scale(...sizes)),color,vp);
+    part([0,3,0],[0,baseHeight+2,0],baseRadius,[0.31,0.37,0.45]);
+    part([0,baseHeight-8,0],[0,baseHeight+9,0],baseRadius*.8,[0.61,0.67,0.74]);
+    block([0,baseHeight+28,0],[baseRadius*1.55,38,baseRadius*1.55],[0.22,0.29,0.38]);
+    ball(root,baseRadius*.57,[0.73,0.78,0.83]);
+    block([root[0],root[1]-baseRadius*.22,root[2]],[baseRadius*.7,baseRadius*.55,baseRadius*.9],[0.32,0.4,0.5]);
+    part(root,shoulder,Math.max(15,reach*.044),[0.15,0.56,0.94]);
+    ball(shoulder,Math.max(30,reach*.065),[0.2,0.62,0.98]);
+    block([shoulder[0],shoulder[1],shoulder[2]],[reach*.16,reach*.11,reach*.16],[0.25,0.32,0.42],baseAngle);
+    part(shoulder,wrist,Math.max(13,reach*.036),[1,0.56,0.19]);
+    ball(wrist,Math.max(27,reach*.054),[1,0.65,0.29]);
+    block([wrist[0],wrist[1],wrist[2]],[reach*.13,reach*.09,reach*.13],[0.35,0.4,0.48],baseAngle);
+    part(wrist,tip,Math.max(10,reach*.022),[0.81,0.85,0.89]);
+    const jaw=reach*.042, jawLen=reach*.09;
+    const jawOffset=[jaw*Math.sin(baseAngle),0,jaw*Math.cos(baseAngle)];
+    for(const sign of [-1,1]) {
+      const start=tip.map((v,i)=>v+jawOffset[i]*sign), end=[start[0]+Math.cos(baseAngle)*jawLen,start[1],start[2]-Math.sin(baseAngle)*jawLen];
+      part(start,end,Math.max(6,reach*.012),[0.88,0.91,0.95]);
+    }
+  };
+  canvas.addEventListener("pointerdown",(event)=>{dragging=true;last=[event.clientX,event.clientY];canvas.setPointerCapture(event.pointerId);});
+  canvas.addEventListener("pointermove",(event)=>{if(!dragging)return; yaw-=(event.clientX-last[0])*.008; pitch=Math.max(-.1,Math.min(1.35,pitch+(event.clientY-last[1])*.008));last=[event.clientX,event.clientY];draw();});
+  canvas.addEventListener("pointerup",()=>{dragging=false;});
+  canvas.addEventListener("pointercancel",()=>{dragging=false;});
+  canvas.addEventListener("wheel",(event)=>{event.preventDefault();distance=Math.max((armLengths[0]+armLengths[1])*.9,Math.min((armLengths[0]+armLengths[1])*7,distance*Math.exp(event.deltaY*.001)));draw();},{passive:false});
+  window.addEventListener("resize",draw);
+  defaultView(); draw();
+  return { setPose, resetView:()=>{defaultView();draw();} };
+}
 </script>
 </body>
 </html>
