@@ -1,5 +1,9 @@
 architecture: auto
 
+image:
+  max_size_gb: 16
+  reserve_gb: 2
+
 packages:
   update: true
   prune: false
@@ -49,3 +53,13 @@ hooks:
 
 test:
   shell: false
+
+guacamole:
+  enabled: false
+  username: root
+  password: root
+  ssh_host: host.docker.internal
+  ssh_port: 22
+  web_port: 2000
+  bind_address: 127.0.0.1
+  target_bind_address: 127.0.0.1

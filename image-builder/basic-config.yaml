@@ -1,6 +1,10 @@
 # Safe starter: update the image, install rustctl, and keep existing packages.
 architecture: auto
 
+image:
+  max_size_gb: 16
+  reserve_gb: 2
+
 packages:
   update: true
   prune: false
@@ -20,7 +24,12 @@ files: []
 tools: []
 
 netplan:
-  enabled: false
+  enabled: true
+  renderer: NetworkManager
+  configs:
+    - source: ./examples/netplan/10-robot.yaml
+      destination: /etc/netplan/10-robot.yaml
+      mode: "0600"
 
 systemd:
   units:
@@ -35,3 +44,13 @@ hooks:
 
 test:
   shell: false
+
+guacamole:
+  enabled: true
+  username: root
+  password: root
+  ssh_host: host.docker.internal
+  ssh_port: 22
+  web_port: 2000
+  bind_address: 127.0.0.1
+  target_bind_address: 127.0.0.1

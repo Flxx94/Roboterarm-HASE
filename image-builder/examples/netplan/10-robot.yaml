@@ -4,3 +4,12 @@ network:
   ethernets:
     eth0:
       dhcp4: true
+  wifis:
+    wlan0:
+      dhcp4: true
+      regulatory-domain: DE
+      access-points:
+        Hothschpoth:
+          auth:
+            key-management: psk
+            password: schnitzelmitpommes

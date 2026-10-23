@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import ipaddress
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +91,10 @@ def image_partitions(image: Path) -> tuple[list[dict[str, str]], list[str]]:
         for partition in table.get("partitions", []):
             offset = int(partition["start"]) * sector_size
             size = int(partition["size"]) * sector_size
+            node = str(partition.get("node", ""))
+            number_match = re.search(r"(\d+)$", node)
+            if not number_match:
+                raise BuildError(f"Cannot determine partition number for {node or partition}")
             device = run(
                 ["losetup", "--find", "--show", "--offset", str(offset), "--sizelimit", str(size), str(image)],
                 capture_output=True,
@@ -105,6 +114,10 @@ def image_partitions(image: Path) -> tuple[list[dict[str, str]], list[str]]:
                     "FSTYPE": metadata.get("TYPE", ""),
                     "PARTLABEL": str(partition.get("name", "")),
                     "TYPE": str(partition.get("type", "")),
+                    "PARTNUM": number_match.group(1),
+                    "START_SECTOR": str(partition["start"]),
+                    "SIZE_SECTORS": str(partition["size"]),
+                    "SECTOR_SIZE": str(sector_size),
                 }
             )
     except Exception:
@@ -112,6 +125,239 @@ def image_partitions(image: Path) -> tuple[list[dict[str, str]], list[str]]:
             run(["losetup", "--detach", device], check=False)
         raise
     return rows, devices
+
+
+def root_partition_row(rows: list[dict[str, str]]) -> dict[str, str]:
+    root_device, _ = select_partitions(rows)
+    return next(row for row in rows if row["PATH"] == root_device)
+
+
+def detach_partitions(devices: list[str]) -> None:
+    for device in reversed(devices):
+        run(["losetup", "--detach", device], check=False)
+
+
+def check_ext_filesystem(device: str) -> None:
+    result = run(["e2fsck", "-f", "-y", device], check=False)
+    # e2fsck returns 1 when it fixed filesystem errors; this is safe to continue.
+    if result.returncode not in {0, 1}:
+        raise BuildError(f"e2fsck failed for {device} with status {result.returncode}")
+
+
+def resize_partition(image: Path, partition_number: str, end: str) -> None:
+    run(["parted", "-s", "-f", str(image), "unit", "s", "resizepart", partition_number, end])
+
+
+def shrink_partition(
+    image: Path,
+    partition_number: str,
+    start_sector: int,
+    end_sector: int,
+    sector_size: int,
+    minimum_partition_bytes: int,
+) -> None:
+    """Safely shrink a partition after its filesystem has already been reduced."""
+    def get_partition_table() -> dict[str, Any]:
+        result = run(["sfdisk", "--json", str(image)], capture_output=True, text=True)
+        return json.loads(result.stdout)["partitiontable"]
+
+    def get_number(partition: dict[str, Any]) -> str | None:
+        match = re.search(r"(\d+)$", str(partition.get("node", "")))
+        return match.group(1) if match else None
+
+    table = get_partition_table()
+    matches = [
+        partition
+        for partition in table.get("partitions", [])
+        if get_number(partition) == partition_number
+    ]
+    if len(matches) != 1:
+        raise BuildError(f"Cannot uniquely identify partition {partition_number} in {image}")
+
+    partition = matches[0]
+    current_start = int(partition["start"])
+    current_end = current_start + int(partition["size"]) - 1
+    if current_start != start_sector:
+        raise BuildError(f"Partition {partition_number} start changed unexpectedly before shrinking")
+    if end_sector >= current_end:
+        raise BuildError(f"Refusing to shrink partition {partition_number} to a non-smaller size")
+    target_partition_bytes = (end_sector - start_sector + 1) * sector_size
+    if end_sector < start_sector or target_partition_bytes < minimum_partition_bytes:
+        raise BuildError(
+            f"Refusing to shrink partition {partition_number}: the requested end does not leave enough room "
+            "for its filesystem and safety margin"
+        )
+
+    # Parted's --script mode always answers "no" to this safety prompt. Its
+    # pretend-input-tty option lets us answer "Yes" only after the checks above,
+    # and only on the disposable working image whose filesystem was shrunk.
+    run(
+        [
+            "parted",
+            "-f",
+            str(image),
+            "---pretend-input-tty",
+            "unit",
+            "s",
+            "resizepart",
+            partition_number,
+            f"{end_sector}s",
+        ],
+        input="Yes\n",
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+
+    updated_table = get_partition_table()
+    updated = [
+        candidate
+        for candidate in updated_table.get("partitions", [])
+        if get_number(candidate) == partition_number
+    ]
+    if len(updated) != 1:
+        raise BuildError(f"Cannot verify resized partition {partition_number} in {image}")
+    actual_start = int(updated[0]["start"])
+    actual_end = actual_start + int(updated[0]["size"]) - 1
+    if actual_start != start_sector or actual_end != end_sector:
+        raise BuildError(
+            f"Partition {partition_number} resize was not applied as requested "
+            f"(expected sectors {start_sector}-{end_sector}, found {actual_start}-{actual_end})"
+        )
+
+
+def ensure_root_is_last(rows: list[dict[str, str]], root: dict[str, str]) -> None:
+    if root["FSTYPE"] not in {"ext2", "ext3", "ext4"}:
+        raise BuildError(f"Automatic image resizing requires an ext filesystem; found {root['FSTYPE'] or 'unknown'}")
+    last = max(rows, key=lambda row: int(row["START_SECTOR"]) + int(row["SIZE_SECTORS"]))
+    if root["PARTNUM"] != last["PARTNUM"]:
+        raise BuildError("Automatic image resizing requires the Linux root partition to be the final partition")
+
+
+def grow_working_image(image: Path, max_size_bytes: int) -> None:
+    """Grow the temporary image and root filesystem before packages are installed."""
+    if image.stat().st_size > max_size_bytes:
+        raise BuildError(
+            f"Input image is already {image.stat().st_size / 1_000_000_000:.2f} GB, "
+            f"larger than image.max_size_gb ({max_size_bytes / 1_000_000_000:.2f} GB)"
+        )
+
+    rows, devices = image_partitions(image)
+    try:
+        root = root_partition_row(rows)
+        ensure_root_is_last(rows, root)
+        root_number = root["PARTNUM"]
+    finally:
+        detach_partitions(devices)
+
+    # Extending the sparse backing file first gives parted room to enlarge the
+    # root partition without allocating all intervening blocks on disk.
+    with image.open("r+b") as stream:
+        stream.truncate(max_size_bytes)
+    resize_partition(image, root_number, "100%")
+
+    rows, devices = image_partitions(image)
+    try:
+        root = root_partition_row(rows)
+        check_ext_filesystem(root["PATH"])
+        run(["resize2fs", "-p", root["PATH"]])
+    finally:
+        detach_partitions(devices)
+    print(f"[image] Expanded temporary root partition to a {max_size_bytes / 1_000_000_000:.2f} GB image limit", flush=True)
+
+
+def filesystem_geometry(device: str) -> tuple[int, int]:
+    details = run(["dumpe2fs", "-h", device], capture_output=True, text=True).stdout
+    blocks = re.search(r"(?m)^Block count:\s*(\d+)\s*$", details)
+    block_size = re.search(r"(?m)^Block size:\s*(\d+)\s*$", details)
+    if not blocks or not block_size:
+        raise BuildError(f"Cannot read ext filesystem geometry from {device}")
+    return int(blocks.group(1)), int(block_size.group(1))
+
+
+def shrink_final_image(image: Path, max_size_bytes: int, reserve_bytes: int) -> None:
+    """Compact the final image while leaving runtime headroom in its root filesystem."""
+    rows, devices = image_partitions(image)
+    try:
+        root = root_partition_row(rows)
+        ensure_root_is_last(rows, root)
+        root_number = root["PARTNUM"]
+        start_sector = int(root["START_SECTOR"])
+        sector_size = int(root["SECTOR_SIZE"])
+        original_fs_size = int(root["SIZE_SECTORS"]) * sector_size
+        check_ext_filesystem(root["PATH"])
+        run(["resize2fs", "-p", "-M", root["PATH"]])
+        minimum_blocks, block_size = filesystem_geometry(root["PATH"])
+    finally:
+        detach_partitions(devices)
+
+    target_blocks = math.ceil((minimum_blocks * block_size + reserve_bytes) / block_size)
+    target_fs_bytes = target_blocks * block_size
+    partition_slack_bytes = 16 * 1024 * 1024
+    partition_bytes = target_fs_bytes + partition_slack_bytes
+    partition_sectors = math.ceil(partition_bytes / sector_size)
+    end_sector = start_sector + partition_sectors - 1
+    image_size = (end_sector + 1) * sector_size + 1024 * 1024
+    if image_size > max_size_bytes:
+        needed = image_size / 1_000_000_000
+        limit = max_size_bytes / 1_000_000_000
+        raise BuildError(
+            f"Finished root filesystem needs {needed:.2f} GB including the configured "
+            f"{reserve_bytes / 1_000_000_000:.2f} GB reserve, exceeding the {limit:.2f} GB image limit. "
+            "Reduce installed packages or Guacamole image storage, or raise image.max_size_gb (up to 16)."
+        )
+
+    # Grow back from the absolute minimum to the desired runtime free-space reserve.
+    rows, devices = image_partitions(image)
+    try:
+        root = root_partition_row(rows)
+        run(["resize2fs", "-p", root["PATH"], str(target_blocks)])
+        final_blocks, block_size = filesystem_geometry(root["PATH"])
+        target_fs_bytes = final_blocks * block_size
+    finally:
+        detach_partitions(devices)
+
+    partition_bytes = target_fs_bytes + partition_slack_bytes
+    partition_sectors = math.ceil(partition_bytes / sector_size)
+    end_sector = start_sector + partition_sectors - 1
+    image_size = (end_sector + 1) * sector_size + 1024 * 1024
+    if image_size > max_size_bytes:
+        raise BuildError("Final image exceeds the configured maximum size after filesystem resizing")
+    shrink_partition(
+        image,
+        root_number,
+        start_sector,
+        end_sector,
+        sector_size,
+        target_fs_bytes + partition_slack_bytes,
+    )
+    with image.open("r+b") as stream:
+        stream.truncate(image_size)
+    # Reposition the backup GPT header after truncating GPT-based images.
+    run(["parted", "-s", "-f", str(image), "print"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    freed = max(0, original_fs_size - target_fs_bytes) / 1_000_000_000
+    print(
+        f"[image] Compacted final image to {image_size / 1_000_000_000:.2f} GB "
+        f"with about {reserve_bytes / 1_000_000_000:.2f} GB filesystem reserve "
+        f"(reclaimed {freed:.2f} GB from the temporary root partition)",
+        flush=True,
+    )
+
+
+def image_size_settings(cfg: dict[str, Any]) -> tuple[int, int]:
+    settings = cfg.get("image", {}) or {}
+    try:
+        max_size_gb = float(settings.get("max_size_gb", 16))
+        reserve_gb = float(settings.get("reserve_gb", 2))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise BuildError("image.max_size_gb and image.reserve_gb must be numbers") from exc
+    if not math.isfinite(max_size_gb) or max_size_gb <= 0 or max_size_gb > 16:
+        raise BuildError("image.max_size_gb must be greater than 0 and no more than 16 GB")
+    if not math.isfinite(reserve_gb) or reserve_gb < 0 or reserve_gb >= max_size_gb:
+        raise BuildError("image.reserve_gb must be non-negative and smaller than image.max_size_gb")
+    # Decimal GB matches SD card and file size labels and guarantees the final
+    # image stays within the user's 16 GB limit.
+    return int(max_size_gb * 1_000_000_000), int(reserve_gb * 1_000_000_000)
 
 
 def select_partitions(rows: list[dict[str, str]]) -> tuple[str, str | None]:
@@ -155,30 +401,43 @@ def package_stage(rootfs: Path, cfg: dict[str, Any]) -> None:
         wanted.append("netplan.io")
         renderer = netplan.get("renderer")
         if renderer == "NetworkManager":
-            wanted.append("network-manager")
+            wanted.extend(["network-manager", "iw"])
         elif renderer == "networkd":
             wanted.append("systemd")
         elif renderer:
             raise BuildError("netplan.renderer must be NetworkManager or networkd")
+    if (cfg.get("guacamole", {}) or {}).get("enabled"):
+        wanted.extend(["openssh-server", "docker.io"])
     if wanted:
         print(f"[packages] Ensuring requested packages: {', '.join(wanted)}", flush=True)
         chroot(rootfs, ["/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", *wanted])
 
-    if not packages.get("prune", False):
+    if packages.get("prune", False):
+        # Mark the existing package set automatic, then mark the declared roots as
+        # manual. APT computes and preserves their dependency closure on autoremove.
+        installed = chroot(rootfs, ["dpkg-query", "-W", "-f=${binary:Package}\\n"], capture_output=True, text=True).stdout.splitlines()
+        for start in range(0, len(installed), 250):
+            batch = installed[start : start + 250]
+            if batch:
+                chroot(rootfs, ["apt-mark", "auto", *batch], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if wanted:
+            chroot(rootfs, ["apt-mark", "manual", *wanted])
+        print("[packages] Removing unneeded automatic packages", flush=True)
+        chroot(rootfs, ["/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "autoremove", "--purge"])
+    else:
         print("[packages] Pruning disabled; preserving the existing package set", flush=True)
-        return
 
-    # Mark the existing package set automatic, then mark the declared roots as
-    # manual. APT computes and preserves their dependency closure on autoremove.
-    installed = chroot(rootfs, ["dpkg-query", "-W", "-f=${binary:Package}\\n"], capture_output=True, text=True).stdout.splitlines()
-    for start in range(0, len(installed), 250):
-        batch = installed[start : start + 250]
-        if batch:
-            chroot(rootfs, ["apt-mark", "auto", *batch], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if wanted:
-        chroot(rootfs, ["apt-mark", "manual", *wanted])
-    print("[packages] Removing unneeded automatic packages", flush=True)
-    chroot(rootfs, ["/usr/bin/env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "autoremove", "--purge"])
+    print("[packages] Clearing cached APT downloads and package indexes", flush=True)
+    chroot(rootfs, ["apt-get", "clean"])
+    apt_lists = rootfs / "var/lib/apt/lists"
+    if apt_lists.is_dir():
+        for item in apt_lists.iterdir():
+            if item.name == "partial":
+                continue
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
 
 
 def copy_declared(config_file: Path, rootfs: Path, entries: list[dict[str, Any]], *, label: str) -> None:
@@ -216,10 +475,14 @@ def apply_netplan(config_file: Path, rootfs: Path, cfg: dict[str, Any]) -> None:
         network = document.get("network") if isinstance(document, dict) else None
         if not isinstance(network, dict):
             raise BuildError(f"Netplan config must contain a network mapping: {source}")
-        configured_renderer = network.get("renderer", netplan.get("renderer", "networkd"))
+        configured_renderer = network.get("renderer", "networkd")
         if configured_renderer != renderer:
             raise BuildError(f"Netplan renderer in {source} ({configured_renderer}) does not match netplan.renderer ({renderer})")
     copy_declared(config_file, rootfs, configs, label="netplan")
+    if renderer == "NetworkManager":
+        # Netplan generates NetworkManager profiles from the YAML at boot;
+        # make sure the selected backend is actually started on headless images.
+        run(["systemctl", f"--root={rootfs}", "enable", "NetworkManager.service"])
 
 
 def apply_systemd(config_file: Path, rootfs: Path, cfg: dict[str, Any]) -> None:
@@ -243,6 +506,251 @@ def apply_systemd(config_file: Path, rootfs: Path, cfg: dict[str, Any]) -> None:
         else:
             verb = "enable" if state == "enabled" else "disable"
             run(["systemctl", f"--root={rootfs}", verb, unit_name])
+
+
+def guacamole_settings(cfg: dict[str, Any]) -> dict[str, Any]:
+    guac = cfg.get("guacamole", {}) or {}
+    settings = {
+        "username": str(guac.get("username", "root")),
+        "password": str(guac.get("password", "root")),
+        "ssh_host": str(guac.get("ssh_host", "host.docker.internal")),
+        "ssh_port": int(guac.get("ssh_port", 22)),
+        "web_port": int(guac.get("web_port", 2000)),
+        "bind_address": str(guac.get("bind_address", "127.0.0.1")),
+        "target_bind_address": str(guac.get("target_bind_address", "127.0.0.1")),
+        "version": str(guac.get("version", "1.6.0")),
+    }
+    if not settings["username"] or not settings["password"] or not settings["ssh_host"]:
+        raise BuildError("guacamole.username, password, and ssh_host must not be empty")
+    for label in ("ssh_port", "web_port"):
+        if not 1 <= settings[label] <= 65535:
+            raise BuildError(f"guacamole.{label} must be between 1 and 65535")
+    for label in ("bind_address", "target_bind_address"):
+        try:
+            ipaddress.IPv4Address(settings[label])
+        except ipaddress.AddressValueError as exc:
+            raise BuildError(f"guacamole.{label} must be an IPv4 address (for example 127.0.0.1 or 0.0.0.0)") from exc
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", settings["version"]):
+        raise BuildError("guacamole.version contains unsupported characters")
+    return settings
+
+
+def prepare_guacamole_images(cfg: dict[str, Any], architecture: str, work_dir: Path) -> list[Path]:
+    guac = cfg.get("guacamole", {}) or {}
+    if not guac.get("enabled"):
+        return []
+    if architecture != "arm64":
+        raise BuildError("On-Pi Guacamole containers require an arm64 Raspberry Pi OS image")
+    require_tool("skopeo")
+    settings = guacamole_settings(cfg)
+    images = [
+        ("guacd", f"guacamole/guacd:{settings['version']}"),
+        ("guacamole", f"guacamole/guacamole:{settings['version']}"),
+    ]
+    archive_paths = []
+    image_dir = work_dir / "guacamole-images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    for name, reference in images:
+        archive = image_dir / f"{name}-{settings['version']}-arm64.tar"
+        valid_archive = False
+        if archive.is_file():
+            try:
+                with tarfile.open(archive, "r:") as image_archive:
+                    valid_archive = any(member.name == "manifest.json" for member in image_archive.getmembers())
+            except (OSError, tarfile.TarError):
+                valid_archive = False
+        if valid_archive:
+            print(f"[guacamole] Reusing preloaded image archive {archive.name}", flush=True)
+        else:
+            archive.unlink(missing_ok=True)
+            print(f"[guacamole] Preloading linux/arm64 image {reference}", flush=True)
+            run([
+                "skopeo", "copy", "--override-os", "linux", "--override-arch", "arm64",
+                f"docker://docker.io/{reference}",
+                f"docker-archive:{archive}:{reference}",
+            ])
+        archive_paths.append(archive)
+    return archive_paths
+
+
+def configure_guacamole_target(rootfs: Path, cfg: dict[str, Any], archives: list[Path]) -> None:
+    guac = cfg.get("guacamole", {}) or {}
+    if not guac.get("enabled"):
+        return
+
+    if len(archives) != 2:
+        raise BuildError("Guacamole image archives were not prepared")
+    settings = guacamole_settings(cfg)
+    version = settings["version"]
+    image_root = target_path(rootfs, "/opt/guacamole/images")
+    image_root.mkdir(parents=True, exist_ok=True)
+    for archive in archives:
+        destination = image_root / archive.name
+        shutil.copy2(archive, destination)
+        destination.chmod(0o644)
+
+    mapping = ET.Element("user-mapping")
+    authorize = ET.SubElement(
+        mapping,
+        "authorize",
+        {
+            "username": settings["username"],
+            "password": hashlib.md5(settings["password"].encode("utf-8"), usedforsecurity=False).hexdigest(),
+            "encoding": "md5",
+        },
+    )
+    connection = ET.SubElement(authorize, "connection", {"name": "Raspberry Pi SSH"})
+    ET.SubElement(connection, "protocol").text = "ssh"
+    ET.SubElement(connection, "param", {"name": "hostname"}).text = settings["ssh_host"]
+    ET.SubElement(connection, "param", {"name": "port"}).text = str(settings["ssh_port"])
+    ET.SubElement(connection, "param", {"name": "username"}).text = "${GUAC_USERNAME}"
+    ET.SubElement(connection, "param", {"name": "password"}).text = "${GUAC_PASSWORD}"
+    ET.indent(mapping, space="  ")
+    mapping_path = target_path(rootfs, "/etc/guacamole/user-mapping.xml")
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(mapping).write(mapping_path, encoding="utf-8", xml_declaration=True)
+    mapping_path.chmod(0o600)
+
+    guacd_image = f"guacamole/guacd:{version}"
+    guac_image = f"guacamole/guacamole:{version}"
+    start_script = f'''#!/bin/sh
+set -eu
+
+load_image() {{
+  image="$1"
+  archive="$2"
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    if [ ! -f "$archive" ]; then
+      echo "Missing preloaded Guacamole image archive: $archive" >&2
+      return 1
+    fi
+    docker load --input "$archive"
+  fi
+  rm -f "$archive"
+}}
+
+ensure_container() {{
+  name="$1"
+  shift
+  if docker container inspect "$name" >/dev/null 2>&1; then
+    running=$(docker inspect --format '{{{{.State.Running}}}}' "$name")
+    if [ "$running" != true ]; then
+      docker start "$name"
+    fi
+  else
+    docker run --detach --name "$name" --restart unless-stopped "$@"
+  fi
+}}
+
+load_image {json.dumps(guacd_image)} /opt/guacamole/images/{archives[0].name}
+load_image {json.dumps(guac_image)} /opt/guacamole/images/{archives[1].name}
+docker network inspect guac >/dev/null 2>&1 || docker network create guac
+ensure_container guacd --network guac --add-host host.docker.internal:host-gateway {json.dumps(guacd_image)}
+ensure_container guacamole --network guac --publish {json.dumps(f"{settings['target_bind_address']}:{settings['web_port']}:8080")} \\
+  --env GUACD_HOSTNAME=guacd --env GUACD_PORT=4822 --env WEBAPP_CONTEXT=ROOT \\
+  --volume /etc/guacamole/user-mapping.xml:/etc/guacamole/user-mapping.xml:ro {json.dumps(guac_image)}
+'''
+    start_path = target_path(rootfs, "/usr/local/sbin/guacamole-start")
+    start_path.parent.mkdir(parents=True, exist_ok=True)
+    start_path.write_text(start_script)
+    start_path.chmod(0o755)
+    stop_path = target_path(rootfs, "/usr/local/sbin/guacamole-stop")
+    stop_path.write_text("#!/bin/sh\ndocker stop guacamole guacd >/dev/null 2>&1 || true\n")
+    stop_path.chmod(0o755)
+    unit_path = target_path(rootfs, "/etc/systemd/system/guacamole.service")
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(
+        "[Unit]\n"
+        "Description=Apache Guacamole remote desktop gateway\n"
+        "Requires=docker.service\n"
+        "After=docker.service network-online.target ssh.service\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        "ExecStart=/usr/local/sbin/guacamole-start\n"
+        "ExecStop=/usr/local/sbin/guacamole-stop\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+    for service in ("ssh.service", "docker.service", "guacamole.service"):
+        run(["systemctl", f"--root={rootfs}", "enable", service])
+
+
+def generate_guacamole_bundle(output: Path, cfg: dict[str, Any]) -> Path | None:
+    guac = cfg.get("guacamole", {}) or {}
+    if not guac.get("enabled"):
+        return None
+
+    settings = guacamole_settings(cfg)
+    username = settings["username"]
+    password = settings["password"]
+    ssh_host = settings["ssh_host"]
+    ssh_port = settings["ssh_port"]
+    web_port = settings["web_port"]
+    bind_address = settings["bind_address"]
+    version = settings["version"]
+
+    bundle = output.parent / f"{output.stem}-guacamole"
+    bundle.mkdir(parents=True, exist_ok=True)
+    mapping = ET.Element("user-mapping")
+    authorize = ET.SubElement(
+        mapping,
+        "authorize",
+        {
+            "username": username,
+            "password": hashlib.md5(password.encode("utf-8"), usedforsecurity=False).hexdigest(),
+            "encoding": "md5",
+        },
+    )
+    connection = ET.SubElement(authorize, "connection", {"name": "Raspberry Pi SSH"})
+    ET.SubElement(connection, "protocol").text = "ssh"
+    ET.SubElement(connection, "param", {"name": "hostname"}).text = ssh_host
+    ET.SubElement(connection, "param", {"name": "port"}).text = str(ssh_port)
+    ET.SubElement(connection, "param", {"name": "username"}).text = "${GUAC_USERNAME}"
+    ET.SubElement(connection, "param", {"name": "password"}).text = "${GUAC_PASSWORD}"
+    ET.indent(mapping, space="  ")
+    mapping_path = bundle / "user-mapping.xml"
+    ET.ElementTree(mapping).write(mapping_path, encoding="utf-8", xml_declaration=True)
+    mapping_path.chmod(0o600)
+
+    guac_image = f"guacamole/guacamole:{version}"
+    guacd_image = f"guacamole/guacd:{version}"
+    published_port = f"{bind_address}:{web_port}:8080"
+    compose = (
+        "services:\n"
+        "  guacd:\n"
+        f"    image: {json.dumps(guacd_image)}\n"
+        "    restart: unless-stopped\n"
+        "    networks: [guac]\n"
+        "  guacamole:\n"
+        f"    image: {json.dumps(guac_image)}\n"
+        "    restart: unless-stopped\n"
+        "    depends_on: [guacd]\n"
+        "    environment:\n"
+        "      GUACD_HOSTNAME: guacd\n"
+        "      GUACD_PORT: \"4822\"\n"
+        "      WEBAPP_CONTEXT: ROOT\n"
+        "    volumes:\n"
+        "      - ./user-mapping.xml:/etc/guacamole/user-mapping.xml:ro\n"
+        f"    ports: [{json.dumps(published_port)}]\n"
+        "    networks: [guac]\n"
+        "networks:\n"
+        "  guac:\n"
+        "    driver: bridge\n"
+    )
+    (bundle / "compose.yaml").write_text(compose)
+    (bundle / "README.md").write_text(
+        "# Guacamole-Testbundle\n\n"
+        "Das erzeugte Raspberry-Pi-Image startet Guacamole selbst beim Boot. Dieses Bundle ist optional und dient zum lokalen Testen auf einem Rechner mit Docker.\n\n"
+        "1. Sicherstellen, dass der konfigurierte SSH-Host erreichbar ist. `host.docker.internal` zeigt im Container auf den Docker-Host.\n"
+        "2. In diesem Ordner `docker compose up -d` ausführen.\n"
+        f"3. Im Browser `http://{bind_address}:{web_port}/` öffnen und mit dem in der Builder-Konfiguration gesetzten Guacamole-Benutzer anmelden.\n"
+        "4. `Raspberry Pi SSH` auswählen. Guacamole reicht die beim Weblogin eingegebenen Daten automatisch als SSH-Zugangsdaten weiter.\n\n"
+        "Der Zielhost muss dieselben Zugangsdaten akzeptieren. Das Bundle lädt die offiziellen Container beim ersten Start aus dem Internet.\n"
+    )
+    bundle.chmod(0o700)
+    return bundle
 
 
 def run_hooks(config_file: Path, rootfs: Path, hooks: list[str], stage: str) -> None:
@@ -278,7 +786,11 @@ def build(args: argparse.Namespace) -> None:
     if input_image == output:
         raise BuildError("Output image must not overwrite the input image")
     cfg = load_config(config_file)
-    for tool in ("losetup", "sfdisk", "blkid", "mount", "umount", "chroot", "systemctl"):
+    max_size_bytes, reserve_bytes = image_size_settings(cfg)
+    for tool in (
+        "losetup", "sfdisk", "blkid", "mount", "umount", "chroot", "systemctl",
+        "parted", "e2fsck", "resize2fs", "dumpe2fs",
+    ):
         require_tool(tool)
     if input_image.suffix.lower() == ".xz":
         require_tool("xz")
@@ -290,6 +802,8 @@ def build(args: argparse.Namespace) -> None:
     work_dir = Path("/work")
     work_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
+    preload_arch = "arm64" if architecture == "auto" else architecture
+    guacamole_archives = prepare_guacamole_images(cfg, preload_arch, work_dir)
     temp_image = work_dir / f"{output.stem}.working.img"
     if temp_image.exists():
         temp_image.unlink()
@@ -300,6 +814,7 @@ def build(args: argparse.Namespace) -> None:
     else:
         print(f"[image] Copying input image to {temp_image}", flush=True)
         shutil.copyfile(input_image, temp_image)
+    grow_working_image(temp_image, max_size_bytes)
 
     partition_devices: list[str] = []
     mounts: list[Path] = []
@@ -315,6 +830,8 @@ def build(args: argparse.Namespace) -> None:
             architecture = detected_arch
         elif architecture != detected_arch:
             raise BuildError(f"Configured architecture {architecture} does not match image architecture {detected_arch}")
+        if (cfg.get("guacamole", {}) or {}).get("enabled") and architecture != "arm64":
+            raise BuildError("On-Pi Guacamole containers require an arm64 Raspberry Pi OS image")
         if boot_partition:
             candidates = [rootfs / "boot/firmware", rootfs / "boot"]
             boot_mount = next((p for p in candidates if p.exists()), candidates[0])
@@ -331,6 +848,7 @@ def build(args: argparse.Namespace) -> None:
         apply_netplan(config_file, rootfs, cfg)
         install_rustctl(rootfs, cfg, architecture)
         apply_systemd(config_file, rootfs, cfg)
+        configure_guacamole_target(rootfs, cfg, guacamole_archives)
         hooks = cfg.get("hooks", {}) or {}
         if hooks.get("mode", "container") != "container":
             raise BuildError("Only hooks.mode=container is implemented; host hooks are planned")
@@ -344,11 +862,14 @@ def build(args: argparse.Namespace) -> None:
     finally:
         for mountpoint in reversed(mounts):
             run(["umount", "--recursive", str(mountpoint)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for device in reversed(partition_devices):
-            run(["losetup", "--detach", device], check=False)
+        detach_partitions(partition_devices)
 
+    shrink_final_image(temp_image, max_size_bytes, reserve_bytes)
+    guac_bundle = generate_guacamole_bundle(output, cfg)
     shutil.move(str(temp_image), str(output))
     print(f"[done] Wrote {output}", flush=True)
+    if guac_bundle:
+        print(f"[done] Guacamole bundle: {guac_bundle}", flush=True)
 
 
 def main() -> int:

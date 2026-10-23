@@ -40,6 +40,7 @@
    - 7.4 [API Implementation Guide](#74-api-implementation-guide)
    - 7.5 [Testing on a PC](#75-testing-on-a-pc)
    - 7.6 [Running on a Raspberry Pi](#76-running-on-a-raspberry-pi)
+   - 7.7 [Building a Raspberry Pi OS Image](#77-building-a-raspberry-pi-os-image)
 8. [Known Issues & Limitations](#8-known-issues--limitations)
 9. [Future Goals](#9-future-goals)
 10. [References](#10-references)
@@ -208,7 +209,10 @@ Roboterarm-HASE/
 ├── gpioTest/                    ← Early GPIO pulse test utility
 ├── image-builder/               ← Raspberry Pi OS image customization tool
 │   ├── builder/cli.py           ← Image build CLI
-│   ├── *.yaml                   ← Starter image configurations
+│   ├── image.sh                 ← Interactive image build helper
+│   ├── config.md                ← Full image-builder configuration reference
+│   ├── basic-config.yaml        ← Safe starter configuration
+│   ├── minimal-config.yaml      ← Package-pruning example
 │   └── examples/                ← Netplan, systemd, file, and hook examples
 ├── docker/                      ← Older ARM64 binary build files
 ├── VI21-Anlagen/                ← Drawings, gearbox notes, measurements, media
@@ -405,16 +409,18 @@ feedback; simulation builds are labeled separately.
 
 ### 4.6 Image and Build Tools
 
-[`image-builder/`](image-builder/README.md) customizes a Raspberry Pi OS `.img`
-or `.img.xz` inside a privileged Linux Docker container. It copies the input to
-a working image, applies the selected package and file configuration, and
-writes an uncompressed image to the output directory. The starter configs are
+[`image-builder/`](image-builder/) customizes a Raspberry Pi OS `.img` or
+`.img.xz` inside a privileged Linux Docker container. It applies package,
+network, systemd, and file configuration and writes an uncompressed image.
+The build instructions are in [Section 7.7](#77-building-a-raspberry-pi-os-image).
+The starter configs are
 [`basic-config.yaml`](image-builder/basic-config.yaml) and
 [`minimal-config.yaml`](image-builder/minimal-config.yaml); package pruning is
 disabled in the basic config and enabled in the minimal one. The builder can
 install a bundled `rustctl` binary for arm64 with the `hardware` feature.
 Because image mounting requires loop devices and mount privileges, the compose
-service runs as privileged; see its README before using it.
+service runs as privileged. The full YAML reference is
+[`image-builder/config.md`](image-builder/config.md).
 
 [`VI21-Anlagen/encodethesecond.py`](VI21-Anlagen/encodethesecond.py) is a
 standalone interactive FFmpeg helper that converts selected video files to
@@ -422,9 +428,7 @@ ProRes MOV files in an `encoded/` directory. It requires `ffmpeg` on the host.
 
 The example systemd unit at
 [`image-builder/examples/systemd/rustctl.service`](image-builder/examples/systemd/rustctl.service)
-currently starts `rustctl` without a mode argument. Since the program needs a
-mode such as `--site`, this example service exits after printing help and should
-be adjusted before enabling it on a deployed image.
+starts `rustctl --site` as the default control service.
 
 [`docker/`](docker/) contains an older ARM64 build path. Its Dockerfile does
 not enable the `hardware` Cargo feature, so it does not produce the GPIO-enabled
@@ -584,7 +588,7 @@ ssh pi@<IP> "sudo ./rustctl --site"
 
 Cross-compilation also requires an AArch64 Linux linker/toolchain configured
 for the Rust target. Building natively on the Pi or using the
-[image builder](image-builder/README.md) avoids that host setup.
+[image builder](#77-building-a-raspberry-pi-os-image) avoids that host setup.
 
 ### 7.3 CLI Modes
 
@@ -916,6 +920,112 @@ sudo ./target/release/rustctl --shell
 Commands are rejected with an error and the loop continues. Press **Ctrl+C** to
 stop the current hardware operation safely.
 
+### 7.7 Building a Raspberry Pi OS Image
+
+The image builder prepares Raspberry Pi OS on macOS, Windows, or Linux through
+Docker. It handles the Linux filesystem and loop-device operations inside its
+container, so the host does not need an ext4 driver. The input `.img` remains
+unchanged, and `.img.xz` files are decompressed automatically.
+
+Place the Raspberry Pi OS image in `image-builder/input/`. The interactive
+helper asks which image and config to use, where to write the result, and
+whether to open the test shell:
+
+```sh
+./image-builder/image.sh
+```
+
+On Windows, run it from Git Bash or WSL with Docker Desktop installed. You can
+also invoke the builder directly from the repository root (replace the input
+filename as needed):
+
+```sh
+docker compose -f image-builder/compose.yaml run --rm --build builder \
+  build \
+  --input /input/image.xz \
+  --config /project/basic-config.yaml \
+  --output /output/raspios-custom.img
+```
+
+The output is written to `image-builder/output/raspios-custom.img`. The basic
+configuration updates Raspberry Pi OS, installs `rustctl`, configures Netplan
+with NetworkManager, and preserves the existing package set. The separate
+[`minimal-config.yaml`](image-builder/minimal-config.yaml) enables APT pruning;
+review its `packages.keep` list carefully before using it. Add `--test` to enter
+the target image's chroot shell before finalizing; type `exit` to continue.
+
+Press Enter at each prompt to use the defaults: the first available image
+(currently `image-builder/input/image.xz`), `basic-config.yaml`,
+`raspios-custom.img`, no test shell, and overwrite an existing output image.
+Set `IMAGE_BUILDER_INPUT`,
+`IMAGE_BUILDER_CONFIG`, `IMAGE_BUILDER_OUTPUT`, or `IMAGE_BUILDER_TEST` before
+running the script to change those defaults. The normal build updates the base
+system, installs `rustctl`, enables its `--site` systemd service, configures
+Netplan, and prepares Guacamole and its boot service. The resulting `.img` is
+ready to flash; flashing itself is the only manual step outside this workflow.
+
+The builder installs missing packages listed under `packages.keep` and
+`packages.extra`. With `packages.prune: true`, it marks these roots and the
+selected Netplan backend as manual, then asks APT to purge unneeded automatic
+packages. Essential packages remain protected. Keep any boot, firmware, or
+hardware-support packages that are not dependencies of the declared roots.
+
+The image sizing settings in `basic-config.yaml` cap the final image at 16 GB.
+The builder temporarily expands the working image for package upgrades and
+Guacamole, then shrinks the filesystem to its actual contents plus a 2 GB free
+reserve. Raspberry Pi OS normally expands the root filesystem on first boot to
+use the flashed card's capacity.
+
+The builder runs privileged because it mounts the image's partitions through
+loop devices. Docker Desktop handles those operations inside its Linux VM, so
+Windows and macOS do not need an ext4 driver. On an x86 Linux host, ARM64
+package scripts may require QEMU/binfmt support; an ARM64 host can run them
+natively. Configuration paths are relative to the YAML file. Netplan files,
+systemd units, and extra files are declared in that YAML. Bash hooks run on the
+builder host outside the target chroot and receive `ROOTFS` (the mounted image
+root) and `BUILD_STAGE` (`after_packages` or `before_finalize`).
+The shared Netplan example configures Ethernet and the `Hothschpoth` WPA2
+network; `basic-config.yaml` selects NetworkManager and installs that profile
+with restrictive file permissions.
+
+#### Guacamole at boot
+
+With `guacamole.enabled: true`, the builder installs Docker and the SSH server,
+preloads the official ARM64 `guacamole/guacamole` and `guacamole/guacd`
+containers, and enables `guacamole.service`. On the Pi's first boot, the service
+imports those local archives and starts both containers. It removes the archive
+copies after a successful import to avoid storing duplicate image data. The Pi
+does not need Internet access to download Guacamole when it boots.
+
+The web interface uses port `2000`. By default it binds to the Pi's loopback
+interface. To open it from a computer, create an SSH tunnel and then browse to
+`http://127.0.0.1:2000/`:
+
+```sh
+ssh -L 2000:127.0.0.1:2000 <pi-user>@<pi-ip>
+```
+
+For direct LAN access, set `guacamole.target_bind_address` to `0.0.0.0` in the
+YAML configuration and use a non-default Guacamole password. The starter config
+uses `root`/`root`; change these values before exposing the service.
+
+Guacamole forwards its web-login credentials to the SSH connection as
+`${GUAC_USERNAME}` and `${GUAC_PASSWORD}`. This removes the second credential
+prompt when the Raspberry Pi accepts the same username and password for SSH.
+Guacamole does not create a Linux account or bypass the Pi's SSH authentication
+policy, so configure the web-login credentials to match an existing SSH account.
+See the [Apache Guacamole credential-token documentation](https://guacamole.apache.org/doc/gug/configuring-guacamole.html#parameter-tokens).
+
+The builder's file-based login is intended for a small, trusted setup. The
+default `root`/`root` values are examples; set them to credentials accepted by
+the Pi's SSH account. Root SSH login is commonly disabled, so a normal Pi user
+is usually the appropriate choice.
+
+When enabled, the builder also creates an optional
+`image-builder/output/raspios-custom-guacamole/` Compose bundle for local
+testing on a Docker host. See [`image-builder/config.md`](image-builder/config.md)
+for all builder settings, hooks, Netplan, systemd, and Guacamole options.
+
 ---
 
 ## 8. Known Issues & Limitations
@@ -928,8 +1038,7 @@ stop the current hardware operation safely.
 | 4 | **M4 is unused** | 🟠 Medium | The auxiliary motor mapping has no motion command or IK axis. |
 | 5 | **Gear ratio is fixed** | 🟡 Low | `GEAR_RATIO` is set to `16.0` in `rustctl/src/config.rs`. |
 | 6 | **`gpioTest` is an unsafe early utility** | 🟠 Medium | It loops indefinitely without Ctrl+C handling and has no direction control. Prefer `rustctl` for hardware motion. |
-| 7 | **Example systemd unit needs a mode** | 🟠 Medium | `image-builder/examples/systemd/rustctl.service` starts the program without `--site` or another mode, so it exits after printing help. |
-| 8 | **Site API has no authentication or TLS** | 🔴 High | It binds to `0.0.0.0:8080` by default. Restrict the bind address or protect it with a firewall and trusted proxy. |
+| 7 | **Site API has no authentication or TLS** | 🔴 High | It binds to `0.0.0.0:8080` by default. Restrict the bind address or protect it with a firewall and trusted proxy. |
 
 ---
 
